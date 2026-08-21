@@ -380,6 +380,26 @@ class MarketProcessTests(unittest.TestCase):
         self.assertEqual(next_values[THERIODIC_UNDERLYING_ID], 100.0)
 
 
+class MarketMakerNamingTests(unittest.TestCase):
+    def test_custom_class_and_instance_names_do_not_use_single_underscores(
+        self,
+    ) -> None:
+        def is_single_underscore_name(name: str) -> bool:
+            return name.startswith("_") and not name.startswith("__")
+
+        class_names = sorted(
+            name for name in vars(MarketMaker) if is_single_underscore_name(name)
+        )
+        instance_names = sorted(
+            name
+            for name in vars(make_market_maker())
+            if is_single_underscore_name(name)
+        )
+
+        self.assertEqual(class_names, [])
+        self.assertEqual(instance_names, [])
+
+
 class MarketMakerWarmUpTests(unittest.TestCase):
     def test_extreme_finite_rate_history_retains_fallback_parameters(self) -> None:
         market_maker = make_market_maker()
@@ -575,6 +595,16 @@ class MarketMakerWarmUpTests(unittest.TestCase):
 
 
 class MarketMakerQuoteTests(unittest.TestCase):
+    def test_position_storage_does_not_collide_with_quote_lookup(self) -> None:
+        option = make_option()
+        market_maker = make_market_maker(options=[option])
+        market_maker.position.add_option_quantity(option.option_id, 1)
+
+        with patch.object(market_maker, "price_option", return_value=0.50):
+            quote = market_maker.quote(option, counterparty_id=77)
+
+        self.assertIsInstance(quote, Quote)
+
     def test_quote_is_two_cents_around_fair_value(self) -> None:
         option = make_option()
         market_maker = make_market_maker(options=[option])
@@ -651,7 +681,7 @@ class MarketMakerQuoteTests(unittest.TestCase):
     def test_exhausted_budget_produces_inert_two_sided_quote(self) -> None:
         option = make_option()
         market_maker = make_market_maker(cash=10.0, options=[option])
-        market_maker._remaining_risk_budget = 0.0
+        market_maker.remaining_risk_budget = 0.0
 
         with patch.object(market_maker, "price_option", return_value=0.50):
             quote = market_maker.quote(option, 1)
@@ -724,7 +754,7 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
     def test_responding_to_fok_never_reserves_budget_or_changes_position(self) -> None:
         option = make_option()
         market_maker = make_market_maker(cash=10.0, options=[option])
-        budget_before = market_maker._remaining_risk_budget
+        budget_before = market_maker.remaining_risk_budget
         position_before = market_maker.position.option_quantity_by_option_id[
             option.option_id
         ]
@@ -735,7 +765,7 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
             )
 
         self.assertTrue(accepted)
-        self.assertEqual(market_maker._remaining_risk_budget, budget_before)
+        self.assertEqual(market_maker.remaining_risk_budget, budget_before)
         self.assertEqual(
             market_maker.position.option_quantity_by_option_id[option.option_id],
             position_before,
@@ -749,13 +779,13 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
         self.assertEqual(
             market_maker.position.option_quantity_by_option_id[option.option_id], 2
         )
-        self.assertAlmostEqual(market_maker._remaining_risk_budget, 9.40)
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 9.40)
 
         market_maker.on_trade(option, price=0.80, quantity=-3, counterparty_id=2)
         self.assertEqual(
             market_maker.position.option_quantity_by_option_id[option.option_id], -1
         )
-        self.assertAlmostEqual(market_maker._remaining_risk_budget, 8.80)
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 8.80)
 
 
 class MarketMakerIntegrationTests(unittest.TestCase):
@@ -796,7 +826,7 @@ class MarketMakerIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(market_maker.price_option(expired_option), 0.0)
-        self.assertGreaterEqual(market_maker._remaining_risk_budget, 0.0)
+        self.assertGreaterEqual(market_maker.remaining_risk_budget, 0.0)
         final_quote = market_maker.quote(expired_option, counterparty_id=11)
         self.assertLess(final_quote.bid_price, final_quote.offer_price)
 

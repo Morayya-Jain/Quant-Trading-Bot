@@ -306,9 +306,7 @@ class MarketMaker:
             maximum_loss = max(0.0, price) * quantity
         else:
             maximum_loss = max(0.0, 1.0 - price) * abs(quantity)
-        self.remaining_risk_budget = max(
-            0.0, self.remaining_risk_budget - maximum_loss
-        )
+        self.remaining_risk_budget = max(0.0, self.remaining_risk_budget - maximum_loss)
 
     @property
     def name(self) -> str:
@@ -330,9 +328,7 @@ class MarketMaker:
             0.0,
             min(
                 0.99,
-                math.floor(
-                    (reservation_price - self.HALF_SPREAD) * 100 + self.EPSILON
-                )
+                math.floor((reservation_price - self.HALF_SPREAD) * 100 + self.EPSILON)
                 / 100,
             ),
         )
@@ -351,7 +347,7 @@ class MarketMaker:
             else:
                 bid_price = round(bid_price - 0.01, 2)
 
-        position = self.position(option.option_id)
+        position = self.get_position(option.option_id)
         bid_quantity = self.safe_quote_quantity(
             inventory_room=self.INVENTORY_LIMIT - position,
             maximum_loss_per_contract=bid_price,
@@ -380,7 +376,7 @@ class MarketMaker:
             return False
 
         reservation_price = self.reservation_price(option)
-        current_position = self.position(option.option_id)
+        current_position = self.get_position(option.option_id)
 
         if fok_order.order_type == OrderType.BUY:
             resulting_position = current_position - fok_order.quantity
@@ -536,7 +532,7 @@ class MarketMaker:
     ) -> float:
         initial_rate = current_values[FED_FUNDS_RATE_UNDERLYING_ID]
         probability_by_rate: dict[float, float] = {initial_rate: 1.0}
-        for _ in range(option.steps_until_expiry):
+        for day_number in range(option.steps_until_expiry):
             next_probability_by_rate: dict[float, float] = defaultdict(float)
             for rate_value, state_probability in probability_by_rate.items():
                 up_probability, down_probability = (
@@ -569,9 +565,9 @@ class MarketMaker:
         random_generator = random.Random(self.MONTE_CARLO_SEED)
         in_the_money_paths = 0
 
-        for _ in range(number_of_paths):
+        for path_number in range(number_of_paths):
             path_values = current_values.copy()
-            for _ in range(option.steps_until_expiry):
+            for day_number in range(option.steps_until_expiry):
                 current_rate = path_values[FED_FUNDS_RATE_UNDERLYING_ID]
                 up_probability, down_probability = (
                     market_parameters.tilted_rate_probabilities(current_rate)
@@ -640,21 +636,21 @@ class MarketMaker:
         try:
             next_value = current_value * math.exp(log_return)
         except OverflowError:
-            next_value = cls._MAX_SIMULATED_VALUE if log_return > 0.0 else 0.0
-        if not math.isfinite(next_value) or next_value >= cls._MAX_SIMULATED_VALUE:
-            return cls._MAX_SIMULATED_VALUE if next_value > 0.0 else 0.0
+            next_value = cls.MAX_SIMULATED_VALUE if log_return > 0.0 else 0.0
+        if not math.isfinite(next_value) or next_value >= cls.MAX_SIMULATED_VALUE:
+            return cls.MAX_SIMULATED_VALUE if next_value > 0.0 else 0.0
         return round(max(0.0, next_value), 2)
 
     def reservation_price(self, option: BinaryOption) -> float:
         fair_value = self.price_option(option)
-        inventory = self.position(option.option_id)
+        inventory = self.get_position(option.option_id)
         inventory_skew = min(
             max(inventory * self.SKEW_PER_CONTRACT, -self.MAX_INVENTORY_SKEW),
             self.MAX_INVENTORY_SKEW,
         )
         return min(max(fair_value - inventory_skew, 0.0), 1.0)
 
-    def position(self, option_id: int) -> int:
+    def get_position(self, option_id: int) -> int:
         return self.position.option_quantity_by_option_id.get(option_id, 0)
 
     def safe_quote_quantity(
@@ -666,8 +662,7 @@ class MarketMaker:
             affordable_quantity = self.BASE_QUANTITY
         else:
             affordable_quantity = math.floor(
-                (self.remaining_risk_budget + self.EPSILON)
-                / maximum_loss_per_contract
+                (self.remaining_risk_budget + self.EPSILON) / maximum_loss_per_contract
             )
         return max(0, min(self.BASE_QUANTITY, inventory_room, affordable_quantity))
 
@@ -684,15 +679,17 @@ class MarketMaker:
             return None
 
         target = 2.0
-        distances = [target - current_rate for current_rate, _ in valid_transitions]
-        up_indicators = [
-            1.0 if next_rate > current_rate + self.EPSILON else 0.0
-            for current_rate, next_rate in valid_transitions
-        ]
-        down_indicators = [
-            1.0 if next_rate < current_rate - self.EPSILON else 0.0
-            for current_rate, next_rate in valid_transitions
-        ]
+        distances: list[float] = []
+        up_indicators: list[float] = []
+        down_indicators: list[float] = []
+        for current_rate, next_rate in valid_transitions:
+            distances.append(target - current_rate)
+            up_indicators.append(
+                1.0 if next_rate > current_rate + self.EPSILON else 0.0
+            )
+            down_indicators.append(
+                1.0 if next_rate < current_rate - self.EPSILON else 0.0
+            )
 
         try:
             mean_distance = self.mean(distances)
