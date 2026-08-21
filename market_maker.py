@@ -290,17 +290,13 @@ class MarketMaker:
         self.remaining_risk_budget: float = max(0.0, cash_balance)
         self.estimated_parameters: MarketParameters = self.default_parameters()
 
-    def on_step_advance(
-        self,
-        new_underlying_state: list[Underlying],
-        new_option_state: list[BinaryOption],
+    def on_step_advance(self,new_underlying_state: list[Underlying], new_option_state: list[BinaryOption]
     ) -> None:
         self.underlying_state = new_underlying_state
         self.active_option_state = new_option_state
 
     def on_trade(
-        self, option: BinaryOption, price: float, quantity: int, counterparty_id: int
-    ) -> None:
+        self, option: BinaryOption, price: float, quantity: int, counterparty_id: int) -> None:
         self.position.add_option_quantity(option.option_id, quantity)
         if quantity > 0:
             maximum_loss = max(0.0, price) * quantity
@@ -310,36 +306,23 @@ class MarketMaker:
 
     @property
     def name(self) -> str:
-        return "SimpleSafeMM"
+        return "Clever Market Making Bot"
 
     def price_option(self, option: BinaryOption) -> float:
-        return self.price_with_parameters(
-            self.estimated_parameters, option, self.LIVE_PATHS
-        )
+        return self.price_with_parameters(self.estimated_parameters, option, self.LIVE_PATHS)
 
     def price_option_from_parameters(
-        self, market_parameters: MarketParameters, option: BinaryOption
-    ) -> float:
+            self, market_parameters: MarketParameters, option: BinaryOption) -> float:
         return self.price_with_parameters(market_parameters, option, self.THEO_PATHS)
 
     def quote(self, option: BinaryOption, counterparty_id: int) -> Quote:
         reservation_price = self.reservation_price(option)
         bid_price = max(
             0.0,
-            min(
-                0.99,
-                math.floor((reservation_price - self.HALF_SPREAD) * 100 + self.EPSILON)
-                / 100,
-            ),
-        )
+            min(0.99, math.floor((reservation_price - self.HALF_SPREAD) * 100 + self.EPSILON)/ 100))
         offer_price = max(
             0.01,
-            min(
-                1.0,
-                math.ceil((reservation_price + self.HALF_SPREAD) * 100 - self.EPSILON)
-                / 100,
-            ),
-        )
+            min(1.0, math.ceil((reservation_price + self.HALF_SPREAD) * 100 - self.EPSILON)/ 100))
 
         if bid_price >= offer_price:
             if offer_price < 1.0:
@@ -499,12 +482,8 @@ class MarketMaker:
             for underlying in self.underlying_state
         }
 
-    def price_with_parameters(
-        self,
-        market_parameters: MarketParameters,
-        option: BinaryOption,
-        number_of_paths: int,
-    ) -> float:
+    def price_with_parameters(self, market_parameters: MarketParameters, 
+                              option: BinaryOption, number_of_paths: int) -> float:
         current_values = self.current_values()
         if option.steps_until_expiry == 0:
             return option.expiry_valuation(current_values)
@@ -525,14 +504,12 @@ class MarketMaker:
         return min(max(probability, 0.0), 1.0)
 
     @staticmethod
-    def price_rate_option_exactly(
-        market_parameters: MarketParameters,
-        option: BinaryOption,
-        current_values: dict[int, float],
-    ) -> float:
+    def price_rate_option_exactly(market_parameters: MarketParameters, option: BinaryOption,
+        current_values: dict[int, float]) -> float:
+        
         initial_rate = current_values[FED_FUNDS_RATE_UNDERLYING_ID]
         probability_by_rate: dict[float, float] = {initial_rate: 1.0}
-        for day_number in range(option.steps_until_expiry):
+        for _ in range(option.steps_until_expiry):
             next_probability_by_rate: dict[float, float] = defaultdict(float)
             for rate_value, state_probability in probability_by_rate.items():
                 up_probability, down_probability = (
@@ -555,19 +532,16 @@ class MarketMaker:
             if option.expiry_valuation({FED_FUNDS_RATE_UNDERLYING_ID: rate_value})
         )
 
-    def price_company_option_by_simulation(
-        self,
-        market_parameters: MarketParameters,
-        option: BinaryOption,
-        current_values: dict[int, float],
-        number_of_paths: int,
+    def price_company_option_by_simulation(self, market_parameters: MarketParameters,
+        option: BinaryOption, current_values: dict[int, float], number_of_paths: int
     ) -> float:
         random_generator = random.Random(self.MONTE_CARLO_SEED)
         in_the_money_paths = 0
 
-        for path_number in range(number_of_paths):
+        for _ in range(number_of_paths):
             path_values = current_values.copy()
-            for day_number in range(option.steps_until_expiry):
+
+            for _ in range(option.steps_until_expiry):
                 current_rate = path_values[FED_FUNDS_RATE_UNDERLYING_ID]
                 up_probability, down_probability = (
                     market_parameters.tilted_rate_probabilities(current_rate)
@@ -612,18 +586,10 @@ class MarketMaker:
         return in_the_money_paths / number_of_paths
 
     @classmethod
-    def advance_company_with_generator(
-        cls,
-        random_generator: random.Random,
-        current_value: float,
-        rate_change: float,
-        sector_shock: float,
-        *,
-        drift: float,
-        rate_beta: float,
-        sector_beta: float,
-        idio_std_dev: float,
-    ) -> float:
+    def advance_company_with_generator(cls, random_generator: random.Random, current_value: float,
+        rate_change: float, sector_shock: float, *, drift: float, rate_beta: float, sector_beta: float,
+        idio_std_dev: float) -> float:
+
         idiosyncratic_shock = random_generator.gauss(0.0, idio_std_dev)
         log_return = (
             drift
@@ -653,9 +619,7 @@ class MarketMaker:
     def get_position(self, option_id: int) -> int:
         return self.position.option_quantity_by_option_id.get(option_id, 0)
 
-    def safe_quote_quantity(
-        self, *, inventory_room: int, maximum_loss_per_contract: float
-    ) -> int:
+    def safe_quote_quantity(self, *, inventory_room: int, maximum_loss_per_contract: float) -> int:
         if inventory_room <= 0 or self.remaining_risk_budget <= self.EPSILON:
             return 0
         if maximum_loss_per_contract <= self.EPSILON:
@@ -666,9 +630,7 @@ class MarketMaker:
             )
         return max(0, min(self.BASE_QUANTITY, inventory_room, affordable_quantity))
 
-    def estimate_rate_parameters(
-        self, rate_values: tuple[float, ...]
-    ) -> tuple[float, float, float] | None:
+    def estimate_rate_parameters(self, rate_values: tuple[float, ...]) -> tuple[float, float, float] | None:
         valid_transitions = [
             (rate_values[index], rate_values[index + 1])
             for index in range(len(rate_values) - 1)
@@ -702,10 +664,7 @@ class MarketMaker:
                 covariance_up = self.covariance(distances, up_indicators)
                 covariance_down = self.covariance(distances, down_indicators)
                 reversion_strength = min(
-                    max(
-                        (covariance_up - covariance_down) / (2.0 * variance_distance),
-                        0.0,
-                    ),
+                    max(0.0, (covariance_up - covariance_down) / (2.0 * variance_distance)),
                     1.0,
                 )
             up_probability = mean_up - reversion_strength * mean_distance
@@ -727,11 +686,9 @@ class MarketMaker:
             down_probability *= scale
         return up_probability, down_probability, reversion_strength
 
-    def estimate_company_parameters(
-        self,
-        rate_values: tuple[float, ...],
-        company_values: tuple[float, ...],
-    ) -> tuple[float, float, dict[int, float]] | None:
+    def estimate_company_parameters(self, rate_values: tuple[float, ...], 
+                company_values: tuple[float, ...]) -> tuple[float, float, dict[int, float]] | None:
+        
         observations: list[tuple[int, float, float]] = []
         for index in range(1, min(len(rate_values), len(company_values))):
             previous_value = company_values[index - 1]
@@ -776,12 +733,9 @@ class MarketMaker:
             return None
         return drift, rate_beta, residuals
 
-    def set_joint_residual_estimates(
-        self,
-        estimates: dict[str, float],
-        ajarai_residuals: dict[int, float],
-        theriodic_residuals: dict[int, float],
-    ) -> None:
+    def set_joint_residual_estimates(self, estimates: dict[str, float], ajarai_residuals: dict[int, float],
+        theriodic_residuals: dict[int, float]) -> None:
+
         common_indices = sorted(ajarai_residuals.keys() & theriodic_residuals.keys())
         if len(common_indices) < self.MIN_ESTIMATION_TRANSITIONS:
             return
