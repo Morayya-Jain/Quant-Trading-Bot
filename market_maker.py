@@ -1,6 +1,7 @@
 import math
 import random
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Final
@@ -276,6 +277,7 @@ class MarketMaker:
     PROBABILITY_FLOOR: Final[float] = 0.001
     RATE_REVERSION_PRIOR_TRANSITIONS: Final[float] = 50.0
     DRIFT_SCALE: Final[float] = 0.005
+    MAX_CACHED_RANDOM_STEPS: Final[int] = 10
     EPSILON: Final[float] = 1e-12
     MAX_SIMULATED_VALUE: Final[float] = 1e300
 
@@ -293,12 +295,19 @@ class MarketMaker:
         self.long_quantity_by_option_id: dict[int, int] = defaultdict(int)
         self.short_quantity_by_option_id: dict[int, int] = defaultdict(int)
         self.estimated_parameters: MarketParameters = self.default_parameters()
+        self.live_price_by_option: dict[BinaryOption, float] = {}
+        self.live_terminal_values_by_expiry: dict[
+            int, list[dict[int, float]]
+        ] = {}
+        self.live_standard_draws: list[tuple[float, float, float, float]] = []
 
     def on_step_advance(self,new_underlying_state: list[Underlying], new_option_state: list[BinaryOption]
     ) -> None:
         self.release_expiry_collateral(new_underlying_state, new_option_state)
         self.underlying_state = new_underlying_state
         self.active_option_state = new_option_state
+        self.live_price_by_option.clear()
+        self.live_terminal_values_by_expiry.clear()
 
     def on_trade(
         self, option: BinaryOption, price: float, quantity: int, counterparty_id: int) -> None:
@@ -342,7 +351,11 @@ class MarketMaker:
         return "Clever Market Making Bot"
 
     def price_option(self, option: BinaryOption) -> float:
-        return self.price_with_parameters(self.estimated_parameters, option, self.LIVE_PATHS)
+        if option not in self.live_price_by_option:
+            self.live_price_by_option[option] = self.price_with_parameters(
+                self.estimated_parameters, option, self.LIVE_PATHS
+            )
+        return self.live_price_by_option[option]
 
     def price_option_from_parameters(
             self, market_parameters: MarketParameters, option: BinaryOption) -> float:
@@ -388,32 +401,8 @@ class MarketMaker:
         )
 
     def respond_to_fok(self, option: BinaryOption, fok_order: FokOrder) -> bool:
-        if fok_order.option_id != option.option_id:
-            return False
-
-        reservation_price = self.reservation_price(option)
-        current_position = self.get_position(option.option_id)
-
-        if fok_order.order_type == OrderType.BUY:
-            resulting_position = current_position - fok_order.quantity
-            has_edge = (
-                fok_order.price + self.EPSILON >= reservation_price + self.FOK_EDGE
-            )
-            maximum_loss = max(0.0, 1.0 - fok_order.price) * fok_order.quantity
-        elif fok_order.order_type == OrderType.SELL:
-            resulting_position = current_position + fok_order.quantity
-            has_edge = (
-                fok_order.price <= reservation_price - self.FOK_EDGE + self.EPSILON
-            )
-            maximum_loss = max(0.0, fok_order.price) * fok_order.quantity
-        else:
-            return False
-
-        if abs(resulting_position) > self.INVENTORY_LIMIT:
-            return False
-        if maximum_loss > self.remaining_risk_budget + self.EPSILON:
-            return False
-        return has_edge
+        """Decline all fill-or-kill orders; this strategy supplies RFQ liquidity only."""
+        return False
 
     def warm_up(self, market_history: MarketHistory) -> None:
         defaults = self.default_parameters()
@@ -424,6 +413,8 @@ class MarketMaker:
         company_results = self.company_estimates(histories, rates)
         self.add_company_estimates(estimates, company_results)
         self.estimated_parameters = self.valid_parameters(estimates, defaults)
+        self.live_price_by_option.clear()
+        self.live_terminal_values_by_expiry.clear()
 
     def add_rate_estimates(self, estimates: dict[str, float], 
         rates: tuple[float, ...] | None) -> None:
@@ -578,55 +569,189 @@ class MarketMaker:
     def price_company_option_by_simulation(self, market_parameters: MarketParameters,
         option: BinaryOption, current_values: dict[int, float], number_of_paths: int
     ) -> float:
-        random_generator = random.Random(self.MONTE_CARLO_SEED)
-        in_the_money_paths = 0
+        use_shared_path_cache = (
+            market_parameters is self.estimated_parameters
+            and number_of_paths == self.LIVE_PATHS
+            and current_values == self.current_values()
+            and self.active_company_option_count(option.steps_until_expiry) > 1
+        )
+        terminal_values: Iterable[dict[int, float]]
+        if use_shared_path_cache:
+            cached_terminal_values = self.live_terminal_values_by_expiry.get(
+                option.steps_until_expiry
+            )
+            if cached_terminal_values is None:
+                cached_terminal_values = list(
+                    self.simulate_terminal_values(
+                        market_parameters,
+                        current_values,
+                        option.steps_until_expiry,
+                        number_of_paths,
+                    )
+                )
+                self.live_terminal_values_by_expiry[
+                    option.steps_until_expiry
+                ] = cached_terminal_values
+            terminal_values = cached_terminal_values
+        else:
+            terminal_values = self.simulate_terminal_values(
+                market_parameters,
+                current_values,
+                option.steps_until_expiry,
+                number_of_paths,
+            )
+        in_the_money_paths = sum(
+            int(option.expiry_valuation(path_values))
+            for path_values in terminal_values
+        )
+        return in_the_money_paths / number_of_paths
+
+    def active_company_option_count(self, steps_until_expiry: int) -> int:
+        return sum(
+            1
+            for option in self.active_option_state
+            if option.steps_until_expiry == steps_until_expiry
+            and any(
+                leg.underlying_id != FED_FUNDS_RATE_UNDERLYING_ID
+                for leg in option.legs
+            )
+        )
+
+    def simulate_terminal_values(self, market_parameters: MarketParameters,
+        current_values: dict[int, float], steps_until_expiry: int, 
+        number_of_paths: int) -> Iterator[dict[int, float]]:
+        
+        standard_draws = self.simulation_standard_draws(
+            steps_until_expiry, number_of_paths
+        )
+        initial_rate = current_values[FED_FUNDS_RATE_UNDERLYING_ID]
+        initial_ajarai = current_values[AJARAI_UNDERLYING_ID]
+        initial_theriodic = current_values[THERIODIC_UNDERLYING_ID]
+        rate_transition_by_value: dict[
+            float, tuple[float, float, float, float]
+        ] = {}
+        tilted_rate_probabilities = market_parameters.tilted_rate_probabilities
+        next_rate_value = market_parameters.next_rate_value
+        advance_company = self.advance_company_with_shock
+        sector_std_dev = market_parameters.sector_std_dev
+        ajarai_drift = market_parameters.ajarai_drift
+        ajarai_rate_beta = market_parameters.ajarai_rate_beta
+        ajarai_sector_beta = market_parameters.ajarai_sector_beta
+        ajarai_idio_std_dev = market_parameters.ajarai_idio_std_dev
+        theriodic_drift = market_parameters.theriodic_drift
+        theriodic_rate_beta = market_parameters.theriodic_rate_beta
+        theriodic_sector_beta = market_parameters.theriodic_sector_beta
+        theriodic_idio_std_dev = market_parameters.theriodic_idio_std_dev
 
         for _ in range(number_of_paths):
-            path_values = current_values.copy()
+            rate_value = initial_rate
+            ajarai_value = initial_ajarai
+            theriodic_value = initial_theriodic
 
-            for _ in range(option.steps_until_expiry):
-                current_rate = path_values[FED_FUNDS_RATE_UNDERLYING_ID]
-                up_probability, down_probability = (
-                    market_parameters.tilted_rate_probabilities(current_rate)
-                )
-                rate_draw = random_generator.random()
+            for _ in range(steps_until_expiry):
+                (
+                    rate_draw,
+                    sector_standard_shock,
+                    ajarai_standard_shock,
+                    theriodic_standard_shock,
+                ) = next(standard_draws)
+                rate_transition = rate_transition_by_value.get(rate_value)
+                if rate_transition is None:
+                    up_probability, down_probability = tilted_rate_probabilities(
+                        rate_value
+                    )
+                    rate_transition = (
+                        up_probability,
+                        down_probability,
+                        next_rate_value(rate_value, 1),
+                        next_rate_value(rate_value, -1),
+                    )
+                    rate_transition_by_value[rate_value] = rate_transition
+                (
+                    up_probability,
+                    down_probability,
+                    up_rate_value,
+                    down_rate_value,
+                ) = rate_transition
                 if rate_draw < up_probability:
-                    next_rate = market_parameters.next_rate_value(current_rate, 1)
+                    next_rate = up_rate_value
                 elif rate_draw < up_probability + down_probability:
-                    next_rate = market_parameters.next_rate_value(current_rate, -1)
+                    next_rate = down_rate_value
                 else:
-                    next_rate = current_rate
+                    next_rate = rate_value
 
-                rate_change = round(next_rate - current_rate, 2)
-                sector_shock = random_generator.gauss(
-                    0.0, market_parameters.sector_std_dev
+                rate_change = round(next_rate - rate_value, 2)
+                sector_shock = (
+                    0.0
+                    + sector_standard_shock * sector_std_dev
                 )
-                path_values = {
-                    FED_FUNDS_RATE_UNDERLYING_ID: next_rate,
-                    AJARAI_UNDERLYING_ID: self.advance_company_with_generator(
-                        random_generator,
-                        path_values[AJARAI_UNDERLYING_ID],
-                        rate_change,
-                        sector_shock,
-                        drift=market_parameters.ajarai_drift,
-                        rate_beta=market_parameters.ajarai_rate_beta,
-                        sector_beta=market_parameters.ajarai_sector_beta,
-                        idio_std_dev=market_parameters.ajarai_idio_std_dev,
-                    ),
-                    THERIODIC_UNDERLYING_ID: self.advance_company_with_generator(
-                        random_generator,
-                        path_values[THERIODIC_UNDERLYING_ID],
-                        rate_change,
-                        sector_shock,
-                        drift=market_parameters.theriodic_drift,
-                        rate_beta=market_parameters.theriodic_rate_beta,
-                        sector_beta=market_parameters.theriodic_sector_beta,
-                        idio_std_dev=market_parameters.theriodic_idio_std_dev,
-                    ),
-                }
-            in_the_money_paths += int(option.expiry_valuation(path_values))
+                ajarai_value = advance_company(
+                    ajarai_value,
+                    rate_change,
+                    sector_shock,
+                    0.0
+                    + ajarai_standard_shock
+                    * ajarai_idio_std_dev,
+                    drift=ajarai_drift,
+                    rate_beta=ajarai_rate_beta,
+                    sector_beta=ajarai_sector_beta,
+                )
+                theriodic_value = advance_company(
+                    theriodic_value,
+                    rate_change,
+                    sector_shock,
+                    0.0
+                    + theriodic_standard_shock
+                    * theriodic_idio_std_dev,
+                    drift=theriodic_drift,
+                    rate_beta=theriodic_rate_beta,
+                    sector_beta=theriodic_sector_beta,
+                )
+                rate_value = next_rate
+            yield {
+                FED_FUNDS_RATE_UNDERLYING_ID: rate_value,
+                AJARAI_UNDERLYING_ID: ajarai_value,
+                THERIODIC_UNDERLYING_ID: theriodic_value,
+            }
 
-        return in_the_money_paths / number_of_paths
+    def simulation_standard_draws(self, steps_until_expiry: int, 
+        number_of_paths: int) -> Iterator[tuple[float, float, float, float]]:
+
+        number_of_draws = steps_until_expiry * number_of_paths
+        use_live_cache = (
+            number_of_paths == self.LIVE_PATHS
+            and steps_until_expiry <= self.MAX_CACHED_RANDOM_STEPS
+        )
+        if not use_live_cache:
+            return self.generate_standard_draws(number_of_draws)
+        if len(self.live_standard_draws) < number_of_draws:
+            return self.generate_and_cache_standard_draws(number_of_draws)
+        return iter(self.live_standard_draws)
+
+    def generate_and_cache_standard_draws(self, number_of_draws: int
+        ) -> Iterator[tuple[float, float, float, float]]:
+
+        generated_draws = []
+        for standard_draw in self.generate_standard_draws(number_of_draws):
+            generated_draws.append(standard_draw)
+            if (
+                len(generated_draws) == number_of_draws
+                and len(self.live_standard_draws) < number_of_draws
+            ):
+                self.live_standard_draws = generated_draws
+            yield standard_draw
+
+    def generate_standard_draws(self, 
+        number_of_draws: int) -> Iterator[tuple[float, float, float, float]]:
+
+        random_generator = random.Random(self.MONTE_CARLO_SEED)
+        for _ in range(number_of_draws):
+            yield (
+                random_generator.random(),
+                random_generator.gauss(0.0, 1.0),
+                random_generator.gauss(0.0, 1.0),
+                random_generator.gauss(0.0, 1.0),
+            )
 
     @classmethod
     def advance_company_with_generator(cls, random_generator: random.Random, current_value: float,
@@ -634,6 +759,20 @@ class MarketMaker:
         idio_std_dev: float) -> float:
 
         idiosyncratic_shock = random_generator.gauss(0.0, idio_std_dev)
+        return cls.advance_company_with_shock(
+            current_value,
+            rate_change,
+            sector_shock,
+            idiosyncratic_shock,
+            drift=drift,
+            rate_beta=rate_beta,
+            sector_beta=sector_beta,
+        )
+
+    @classmethod
+    def advance_company_with_shock(cls, current_value: float, rate_change: float, sector_shock: float, 
+            idiosyncratic_shock: float, *, drift: float, rate_beta: float, sector_beta: float) -> float:
+
         log_return = (
             drift
             + rate_beta * rate_change

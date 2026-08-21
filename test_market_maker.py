@@ -300,6 +300,185 @@ class MarketMakerPricingTests(unittest.TestCase):
         self.assertGreaterEqual(prices[0], 0.0)
         self.assertLessEqual(prices[0], 1.0)
 
+    def test_live_price_is_reused_until_the_market_advances(self) -> None:
+        option = make_option(strike=103.0, steps=2)
+        market_maker = make_market_maker(options=[option])
+
+        with patch.object(
+            market_maker,
+            "price_company_option_by_simulation",
+            wraps=market_maker.price_company_option_by_simulation,
+        ) as simulated_price:
+            first_price = market_maker.price_option(option)
+            second_price = market_maker.price_option(option)
+
+            next_underlyings = [
+                replace(underlying, value=105.0)
+                if underlying.underlying_id == AJARAI_UNDERLYING_ID
+                else underlying
+                for underlying in market_maker.underlying_state
+            ]
+            market_maker.on_step_advance(next_underlyings, [option])
+            market_maker.price_option(option)
+
+        self.assertEqual(first_price, second_price)
+        self.assertEqual(simulated_price.call_count, 2)
+
+    def test_warm_up_invalidates_the_live_price_cache(self) -> None:
+        option = make_option(strike=103.0, steps=2)
+        market_maker = make_market_maker(options=[option])
+
+        with patch.object(
+            market_maker,
+            "price_company_option_by_simulation",
+            wraps=market_maker.price_company_option_by_simulation,
+        ) as simulated_price:
+            market_maker.price_option(option)
+            market_maker.warm_up(MarketHistory({}))
+            market_maker.price_option(option)
+
+        self.assertEqual(simulated_price.call_count, 2)
+
+    def test_live_company_options_with_the_same_expiry_share_paths(self) -> None:
+        options = [
+            make_option(option_id=401, steps=2),
+            make_option(
+                option_id=402,
+                underlying_id=THERIODIC_UNDERLYING_ID,
+                steps=2,
+            ),
+            BinaryOption(
+                legs=(
+                    OptionLeg(AJARAI_UNDERLYING_ID, 1.0),
+                    OptionLeg(THERIODIC_UNDERLYING_ID, -1.0),
+                ),
+                option_id=403,
+                steps_until_expiry=2,
+                strike=0.0,
+            ),
+        ]
+        market_maker = make_market_maker(options=options)
+        uncached_parameters = replace(estimated_parameters(market_maker))
+        uncached_prices = [
+            market_maker.price_with_parameters(uncached_parameters, option, 5)
+            for option in options
+        ]
+
+        with (
+            patch.object(market_maker, "LIVE_PATHS", 5),
+            patch.object(
+                MarketMaker,
+                "advance_company_with_shock",
+                wraps=MarketMaker.advance_company_with_shock,
+            ) as advance_company,
+        ):
+            cached_prices = [
+                market_maker.price_option(option) for option in options
+            ]
+
+        self.assertEqual(cached_prices, uncached_prices)
+        self.assertEqual(advance_company.call_count, 20)
+
+    def test_single_company_option_does_not_retain_terminal_paths(self) -> None:
+        option = make_option(strike=103.0, steps=2)
+        market_maker = make_market_maker(options=[option])
+
+        market_maker.price_option(option)
+
+        self.assertEqual(market_maker.live_terminal_values_by_expiry, {})
+
+    def test_live_standard_draws_are_reused_after_a_market_advance(self) -> None:
+        option = make_option(strike=103.0, steps=2)
+        market_maker = make_market_maker(options=[option])
+
+        with patch.object(market_maker, "LIVE_PATHS", 5):
+            market_maker.price_option(option)
+            first_draws = market_maker.live_standard_draws.copy()
+
+            next_underlyings = [
+                replace(underlying, value=105.0)
+                if underlying.underlying_id == AJARAI_UNDERLYING_ID
+                else underlying
+                for underlying in market_maker.underlying_state
+            ]
+            market_maker.on_step_advance(next_underlyings, [option])
+            market_maker.price_option(option)
+
+        random_generator = random.Random(market_maker.MONTE_CARLO_SEED)
+        expected_draws = [
+            (
+                random_generator.random(),
+                random_generator.gauss(0.0, 1.0),
+                random_generator.gauss(0.0, 1.0),
+                random_generator.gauss(0.0, 1.0),
+            )
+            for _ in range(10)
+        ]
+        self.assertEqual(len(first_draws), 10)
+        self.assertEqual(first_draws, expected_draws)
+        self.assertEqual(market_maker.live_standard_draws, first_draws)
+
+    def test_long_live_expiry_does_not_populate_the_random_draw_cache(self) -> None:
+        option = make_option(strike=103.0, steps=11)
+        market_maker = make_market_maker(options=[option])
+
+        with patch.object(market_maker, "LIVE_PATHS", 5):
+            market_maker.price_option(option)
+
+        self.assertEqual(market_maker.live_standard_draws, [])
+
+    def test_simulation_reuses_transitions_for_repeated_rate_states(self) -> None:
+        market_maker = make_market_maker()
+        parameters = make_parameters()
+        original_method = MarketParameters.tilted_rate_probabilities
+
+        with patch.object(
+            MarketParameters,
+            "tilted_rate_probabilities",
+            autospec=True,
+            side_effect=original_method,
+        ) as tilted_probabilities:
+            list(
+                market_maker.simulate_terminal_values(
+                    parameters,
+                    market_maker.current_values(),
+                    steps_until_expiry=5,
+                    number_of_paths=20,
+                )
+            )
+
+        self.assertLessEqual(tilted_probabilities.call_count, 11)
+
+    def test_theo_pricing_does_not_populate_live_caches(self) -> None:
+        options = [
+            make_option(option_id=501, strike=103.0, steps=2),
+            make_option(
+                option_id=502,
+                underlying_id=THERIODIC_UNDERLYING_ID,
+                strike=103.0,
+                steps=2,
+            ),
+        ]
+        market_maker = make_market_maker(options=options)
+        market_maker.price_option(options[0])
+        live_prices_before = market_maker.live_price_by_option.copy()
+        terminal_values_before = market_maker.live_terminal_values_by_expiry.copy()
+        parameters = estimated_parameters(market_maker)
+        expected_price = market_maker.price_with_parameters(
+            replace(parameters), options[1], market_maker.THEO_PATHS
+        )
+
+        actual_price = market_maker.price_option_from_parameters(
+            parameters, options[1]
+        )
+
+        self.assertEqual(actual_price, expected_price)
+        self.assertEqual(market_maker.live_price_by_option, live_prices_before)
+        self.assertEqual(
+            market_maker.live_terminal_values_by_expiry,
+            terminal_values_before,
+        )
+
     def test_company_prices_match_independent_supplied_process_oracle(self) -> None:
         options = [
             make_option(option_id=301, strike=101.0, steps=3),
@@ -1025,17 +1204,17 @@ class MarketMakerQuoteTests(unittest.TestCase):
 
 
 class MarketMakerFokAndAccountingTests(unittest.TestCase):
-    def test_fok_side_interpretation_and_edge_thresholds(self) -> None:
+    def test_fok_orders_are_always_declined(self) -> None:
         option = make_option()
         market_maker = make_market_maker(options=[option])
 
-        with patch.object(market_maker, "price_option", return_value=0.50):
-            self.assertTrue(
+        with patch.object(market_maker, "price_option") as price_option:
+            self.assertFalse(
                 market_maker.respond_to_fok(
                     option, FokOrder(1, option.option_id, OrderType.BUY, 0.51, 1)
                 )
             )
-            self.assertTrue(
+            self.assertFalse(
                 market_maker.respond_to_fok(
                     option, FokOrder(1, option.option_id, OrderType.SELL, 0.49, 1)
                 )
@@ -1050,6 +1229,8 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
                     option, FokOrder(1, option.option_id, OrderType.SELL, 0.50, 1)
                 )
             )
+
+        price_option.assert_not_called()
 
     def test_fok_rejects_wrong_contract_inventory_breach_and_full_fill_risk(
         self,
@@ -1099,7 +1280,7 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
                 option, FokOrder(1, option.option_id, OrderType.BUY, 0.80, 2)
             )
 
-        self.assertTrue(accepted)
+        self.assertFalse(accepted)
         self.assertEqual(market_maker.remaining_risk_budget, budget_before)
         self.assertEqual(
             market_maker.position.option_quantity_by_option_id[option.option_id],
@@ -1195,8 +1376,7 @@ class MarketMakerIntegrationTests(unittest.TestCase):
             option,
             FokOrder(11, option.option_id, OrderType.BUY, 1.0, 1),
         )
-        self.assertTrue(accepted)
-        market_maker.on_trade(option, price=1.0, quantity=-1, counterparty_id=11)
+        self.assertFalse(accepted)
 
         expired_option = option.advance_step()
         market_maker.on_step_advance(
