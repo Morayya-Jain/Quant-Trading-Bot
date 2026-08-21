@@ -384,42 +384,44 @@ class MarketMaker:
 
     def warm_up(self, market_history: MarketHistory) -> None:
         defaults = self.default_parameters()
-        estimates: dict[str, float] = {
-            "ajarai_drift": defaults.ajarai_drift,
-            "ajarai_idio_std_dev": defaults.ajarai_idio_std_dev,
-            "ajarai_rate_beta": defaults.ajarai_rate_beta,
-            "ajarai_sector_beta": defaults.ajarai_sector_beta,
-            "rate_down_probability": defaults.rate_down_probability,
-            "rate_reversion_strength": defaults.rate_reversion_strength,
-            "rate_up_probability": defaults.rate_up_probability,
-            "sector_std_dev": defaults.sector_std_dev,
-            "theriodic_drift": defaults.theriodic_drift,
-            "theriodic_idio_std_dev": defaults.theriodic_idio_std_dev,
-            "theriodic_rate_beta": defaults.theriodic_rate_beta,
-            "theriodic_sector_beta": defaults.theriodic_sector_beta,
-            "rate_step": defaults.rate_step,
-            "rate_target": defaults.rate_target,
-        }
-
+        estimates: dict[str, float] = vars(defaults).copy()
         histories = market_history.values_by_underlying_id
         rates = histories.get(FED_FUNDS_RATE_UNDERLYING_ID)
-        if rates is not None:
-            rate_estimate = self.estimate_rate_parameters(rates)
-            if rate_estimate is not None:
-                up_probability, down_probability, reversion_strength = rate_estimate
-                estimates["rate_up_probability"] = up_probability
-                estimates["rate_down_probability"] = down_probability
-                estimates["rate_reversion_strength"] = reversion_strength
+        self.add_rate_estimates(estimates, rates)
+        company_results = self.company_estimates(histories, rates)
+        self.add_company_estimates(estimates, company_results)
+        self.estimated_parameters = self.valid_parameters(estimates, defaults)
 
-        company_results: dict[int, tuple[float, float, dict[int, float]]] = {}
-        if rates is not None:
-            for underlying_id in (AJARAI_UNDERLYING_ID, THERIODIC_UNDERLYING_ID):
-                values = histories.get(underlying_id)
-                if values is None:
-                    continue
-                result = self.estimate_company_parameters(rates, values)
-                if result is not None:
-                    company_results[underlying_id] = result
+    def add_rate_estimates(self, estimates: dict[str, float], 
+                    rates: tuple[float, ...] | None) -> None:
+        if rates is None:
+            return
+        rate_estimate = self.estimate_rate_parameters(rates)
+        if rate_estimate is None:
+            return
+        up_probability, down_probability, reversion_strength = rate_estimate
+        estimates["rate_up_probability"] = up_probability
+        estimates["rate_down_probability"] = down_probability
+        estimates["rate_reversion_strength"] = reversion_strength
+
+    def company_estimates(self, histories: dict[int, tuple[float, ...]],
+        rates: tuple[float, ...] | None) -> dict[int, tuple[float, float, dict[int, float]]]:
+
+        if rates is None:
+            return {}
+        results: dict[int, tuple[float, float, dict[int, float]]] = {}
+
+        for underlying_id in (AJARAI_UNDERLYING_ID, THERIODIC_UNDERLYING_ID):
+            values = histories.get(underlying_id)
+            if values is None:
+                continue
+            result = self.estimate_company_parameters(rates, values)
+            if result is not None:
+                results[underlying_id] = result
+        return results
+
+    def add_company_estimates(self, estimates: dict[str, float],
+        company_results: dict[int, tuple[float, float, dict[int, float]]]) -> None:
 
         ajarai_result = company_results.get(AJARAI_UNDERLYING_ID)
         theriodic_result = company_results.get(THERIODIC_UNDERLYING_ID)
@@ -446,16 +448,21 @@ class MarketMaker:
                     list(theriodic_result[2].values())
                 )
 
+    @staticmethod
+    def valid_parameters(estimates: dict[str, float], 
+        defaults: MarketParameters) -> MarketParameters:
         try:
             candidate = MarketParameters(**estimates)
         except (TypeError, ValueError):
-            candidate = defaults
-        if all(
-            math.isfinite(getattr(candidate, field_name)) for field_name in estimates
-        ):
-            self.estimated_parameters = candidate
-        else:
-            self.estimated_parameters = defaults
+            return defaults
+        return (
+            candidate
+            if all(
+                math.isfinite(getattr(candidate, field_name))
+                for field_name in estimates
+            )
+            else defaults
+        )
 
     @staticmethod
     def default_parameters() -> MarketParameters:

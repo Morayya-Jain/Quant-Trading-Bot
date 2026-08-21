@@ -173,7 +173,7 @@ class MarketMakerPricingTests(unittest.TestCase):
             reference_prices(make_parameters(), options)
 
     def test_name_is_fixed_and_nonempty(self) -> None:
-        self.assertEqual(make_market_maker().name, "SimpleSafeMM")
+        self.assertEqual(make_market_maker().name, "Clever Market Making Bot")
 
     def test_expired_option_returns_exact_payoff(self) -> None:
         option_in = make_option(strike=100.0, steps=0)
@@ -401,6 +401,14 @@ class MarketMakerNamingTests(unittest.TestCase):
 
 
 class MarketMakerWarmUpTests(unittest.TestCase):
+    def test_empty_history_preserves_default_parameters(self) -> None:
+        market_maker = make_market_maker()
+        default_parameters = estimated_parameters(market_maker)
+
+        market_maker.warm_up(MarketHistory({}))
+
+        self.assertEqual(estimated_parameters(market_maker), default_parameters)
+
     def test_extreme_finite_rate_history_retains_fallback_parameters(self) -> None:
         market_maker = make_market_maker()
         fallback_parameters = estimated_parameters(market_maker)
