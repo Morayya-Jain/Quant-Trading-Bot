@@ -290,24 +290,34 @@ class MarketMaker:
         self._remaining_risk_budget: float = max(0.0, cash_balance)
         self._estimated_parameters: MarketParameters = self._default_parameters()
 
-    def on_step_advance(self, new_underlying_state: list[Underlying], new_option_state: list[BinaryOption]) -> None:
+    def on_step_advance(
+        self,
+        new_underlying_state: list[Underlying],
+        new_option_state: list[BinaryOption],
+    ) -> None:
         self.underlying_state = new_underlying_state
         self.active_option_state = new_option_state
 
-    def on_trade(self, option: BinaryOption, price: float, quantity: int, counterparty_id: int) -> None:
+    def on_trade(
+        self, option: BinaryOption, price: float, quantity: int, counterparty_id: int
+    ) -> None:
         self.position.add_option_quantity(option.option_id, quantity)
         if quantity > 0:
             maximum_loss = max(0.0, price) * quantity
         else:
             maximum_loss = max(0.0, 1.0 - price) * abs(quantity)
-        self._remaining_risk_budget = max(0.0, self._remaining_risk_budget - maximum_loss)
+        self._remaining_risk_budget = max(
+            0.0, self._remaining_risk_budget - maximum_loss
+        )
 
     @property
     def name(self) -> str:
         return "SimpleSafeMM"
 
     def price_option(self, option: BinaryOption) -> float:
-        return self._price_with_parameters(self._estimated_parameters, option, self._LIVE_PATHS)
+        return self._price_with_parameters(
+            self._estimated_parameters, option, self._LIVE_PATHS
+        )
 
     def price_option_from_parameters(
         self, market_parameters: MarketParameters, option: BinaryOption
@@ -318,11 +328,21 @@ class MarketMaker:
         reservation_price = self._reservation_price(option)
         bid_price = max(
             0.0,
-            min(0.99, math.floor((reservation_price - self._HALF_SPREAD) * 100 + self._EPSILON) / 100),
+            min(
+                0.99,
+                math.floor(
+                    (reservation_price - self._HALF_SPREAD) * 100 + self._EPSILON
+                )
+                / 100,
+            ),
         )
         offer_price = max(
             0.01,
-            min(1.0, math.ceil((reservation_price + self._HALF_SPREAD) * 100 - self._EPSILON) / 100),
+            min(
+                1.0,
+                math.ceil((reservation_price + self._HALF_SPREAD) * 100 - self._EPSILON)
+                / 100,
+            ),
         )
 
         if bid_price >= offer_price:
@@ -364,11 +384,15 @@ class MarketMaker:
 
         if fok_order.order_type == OrderType.BUY:
             resulting_position = current_position - fok_order.quantity
-            has_edge = fok_order.price + self._EPSILON >= reservation_price + self._FOK_EDGE
+            has_edge = (
+                fok_order.price + self._EPSILON >= reservation_price + self._FOK_EDGE
+            )
             maximum_loss = max(0.0, 1.0 - fok_order.price) * fok_order.quantity
         elif fok_order.order_type == OrderType.SELL:
             resulting_position = current_position + fok_order.quantity
-            has_edge = fok_order.price <= reservation_price - self._FOK_EDGE + self._EPSILON
+            has_edge = (
+                fok_order.price <= reservation_price - self._FOK_EDGE + self._EPSILON
+            )
             maximum_loss = max(0.0, fok_order.price) * fok_order.quantity
         else:
             return False
@@ -428,20 +452,28 @@ class MarketMaker:
             estimates["theriodic_rate_beta"] = theriodic_result[1]
 
         if ajarai_result is not None and theriodic_result is not None:
-            self._set_joint_residual_estimates(estimates, ajarai_result[2], theriodic_result[2])
+            self._set_joint_residual_estimates(
+                estimates, ajarai_result[2], theriodic_result[2]
+            )
         else:
             if ajarai_result is not None:
                 estimates["ajarai_sector_beta"] = 0.0
-                estimates["ajarai_idio_std_dev"] = self._residual_std_dev(ajarai_result[2].values())
+                estimates["ajarai_idio_std_dev"] = self._residual_std_dev(
+                    list(ajarai_result[2].values())
+                )
             if theriodic_result is not None:
                 estimates["theriodic_sector_beta"] = 0.0
-                estimates["theriodic_idio_std_dev"] = self._residual_std_dev(theriodic_result[2].values())
+                estimates["theriodic_idio_std_dev"] = self._residual_std_dev(
+                    list(theriodic_result[2].values())
+                )
 
         try:
             candidate = MarketParameters(**estimates)
         except (TypeError, ValueError):
             candidate = defaults
-        if all(math.isfinite(getattr(candidate, field_name)) for field_name in estimates):
+        if all(
+            math.isfinite(getattr(candidate, field_name)) for field_name in estimates
+        ):
             self._estimated_parameters = candidate
         else:
             self._estimated_parameters = defaults
@@ -466,7 +498,10 @@ class MarketMaker:
         )
 
     def _current_values(self) -> dict[int, float]:
-        return {underlying.underlying_id: underlying.value for underlying in self.underlying_state}
+        return {
+            underlying.underlying_id: underlying.value
+            for underlying in self.underlying_state
+        }
 
     def _price_with_parameters(
         self,
@@ -478,8 +513,12 @@ class MarketMaker:
         if option.steps_until_expiry == 0:
             return option.expiry_valuation(current_values)
 
-        if all(leg.underlying_id == FED_FUNDS_RATE_UNDERLYING_ID for leg in option.legs):
-            probability = self._price_rate_option_exactly(market_parameters, option, current_values)
+        if all(
+            leg.underlying_id == FED_FUNDS_RATE_UNDERLYING_ID for leg in option.legs
+        ):
+            probability = self._price_rate_option_exactly(
+                market_parameters, option, current_values
+            )
         else:
             probability = self._price_company_option_by_simulation(
                 market_parameters,
@@ -500,13 +539,15 @@ class MarketMaker:
         for _ in range(option.steps_until_expiry):
             next_probability_by_rate: dict[float, float] = defaultdict(float)
             for rate_value, state_probability in probability_by_rate.items():
-                up_probability, down_probability = market_parameters.tilted_rate_probabilities(rate_value)
-                next_probability_by_rate[market_parameters.next_rate_value(rate_value, 1)] += (
-                    state_probability * up_probability
+                up_probability, down_probability = (
+                    market_parameters.tilted_rate_probabilities(rate_value)
                 )
-                next_probability_by_rate[market_parameters.next_rate_value(rate_value, -1)] += (
-                    state_probability * down_probability
-                )
+                next_probability_by_rate[
+                    market_parameters.next_rate_value(rate_value, 1)
+                ] += state_probability * up_probability
+                next_probability_by_rate[
+                    market_parameters.next_rate_value(rate_value, -1)
+                ] += state_probability * down_probability
                 next_probability_by_rate[rate_value] += state_probability * (
                     1.0 - up_probability - down_probability
                 )
@@ -515,7 +556,7 @@ class MarketMaker:
         return sum(
             state_probability
             for rate_value, state_probability in probability_by_rate.items()
-            if option.expiry_valuation({FED_FUNDS_RATE_UNDERLYING_ID: rate_value}) == 1.0
+            if option.expiry_valuation({FED_FUNDS_RATE_UNDERLYING_ID: rate_value})
         )
 
     def _price_company_option_by_simulation(
@@ -532,7 +573,9 @@ class MarketMaker:
             path_values = current_values.copy()
             for _ in range(option.steps_until_expiry):
                 current_rate = path_values[FED_FUNDS_RATE_UNDERLYING_ID]
-                up_probability, down_probability = market_parameters.tilted_rate_probabilities(current_rate)
+                up_probability, down_probability = (
+                    market_parameters.tilted_rate_probabilities(current_rate)
+                )
                 rate_draw = random_generator.random()
                 if rate_draw < up_probability:
                     next_rate = market_parameters.next_rate_value(current_rate, 1)
@@ -542,7 +585,9 @@ class MarketMaker:
                     next_rate = current_rate
 
                 rate_change = round(next_rate - current_rate, 2)
-                sector_shock = random_generator.gauss(0.0, market_parameters.sector_std_dev)
+                sector_shock = random_generator.gauss(
+                    0.0, market_parameters.sector_std_dev
+                )
                 path_values = {
                     FED_FUNDS_RATE_UNDERLYING_ID: next_rate,
                     AJARAI_UNDERLYING_ID: self._advance_company_with_generator(
@@ -612,14 +657,17 @@ class MarketMaker:
     def _position(self, option_id: int) -> int:
         return self.position.option_quantity_by_option_id.get(option_id, 0)
 
-    def _safe_quote_quantity(self, *, inventory_room: int, maximum_loss_per_contract: float) -> int:
+    def _safe_quote_quantity(
+        self, *, inventory_room: int, maximum_loss_per_contract: float
+    ) -> int:
         if inventory_room <= 0 or self._remaining_risk_budget <= self._EPSILON:
             return 0
         if maximum_loss_per_contract <= self._EPSILON:
             affordable_quantity = self._BASE_QUANTITY
         else:
             affordable_quantity = math.floor(
-                (self._remaining_risk_budget + self._EPSILON) / maximum_loss_per_contract
+                (self._remaining_risk_budget + self._EPSILON)
+                / maximum_loss_per_contract
             )
         return max(0, min(self._BASE_QUANTITY, inventory_room, affordable_quantity))
 
@@ -629,7 +677,8 @@ class MarketMaker:
         valid_transitions = [
             (rate_values[index], rate_values[index + 1])
             for index in range(len(rate_values) - 1)
-            if math.isfinite(rate_values[index]) and math.isfinite(rate_values[index + 1])
+            if math.isfinite(rate_values[index])
+            and math.isfinite(rate_values[index + 1])
         ]
         if len(valid_transitions) < self._MIN_ESTIMATION_TRANSITIONS:
             return None
@@ -645,23 +694,32 @@ class MarketMaker:
             for current_rate, next_rate in valid_transitions
         ]
 
-        mean_distance = self._mean(distances)
-        variance_distance = self._variance(distances)
-        mean_up = self._mean(up_indicators)
-        mean_down = self._mean(down_indicators)
-        if variance_distance <= self._EPSILON:
-            reversion_strength = self._default_parameters().rate_reversion_strength
-        else:
-            covariance_up = self._covariance(distances, up_indicators)
-            covariance_down = self._covariance(distances, down_indicators)
-            reversion_strength = min(
-                max((covariance_up - covariance_down) / (2.0 * variance_distance), 0.0),
-                1.0,
-            )
-        up_probability = mean_up - reversion_strength * mean_distance
-        down_probability = mean_down + reversion_strength * mean_distance
+        try:
+            mean_distance = self._mean(distances)
+            variance_distance = self._variance(distances)
+            mean_up = self._mean(up_indicators)
+            mean_down = self._mean(down_indicators)
+            if variance_distance <= self._EPSILON:
+                reversion_strength = self._default_parameters().rate_reversion_strength
+            else:
+                covariance_up = self._covariance(distances, up_indicators)
+                covariance_down = self._covariance(distances, down_indicators)
+                reversion_strength = min(
+                    max(
+                        (covariance_up - covariance_down) / (2.0 * variance_distance),
+                        0.0,
+                    ),
+                    1.0,
+                )
+            up_probability = mean_up - reversion_strength * mean_distance
+            down_probability = mean_down + reversion_strength * mean_distance
+        except (OverflowError, ValueError):
+            return None
 
-        if not all(math.isfinite(value) for value in (up_probability, down_probability, reversion_strength)):
+        if not all(
+            math.isfinite(value)
+            for value in (up_probability, down_probability, reversion_strength)
+        ):
             return None
         up_probability = max(up_probability, self._PROBABILITY_FLOOR)
         down_probability = max(down_probability, self._PROBABILITY_FLOOR)
@@ -700,19 +758,25 @@ class MarketMaker:
 
         rate_changes = [observation[1] for observation in observations]
         log_returns = [observation[2] for observation in observations]
-        variance_rate_change = self._variance(rate_changes)
-        if variance_rate_change <= self._EPSILON:
-            rate_beta = 0.0
-        else:
-            rate_beta = self._covariance(rate_changes, log_returns) / variance_rate_change
-        drift = self._mean(log_returns) - rate_beta * self._mean(rate_changes)
+        try:
+            variance_rate_change = self._variance(rate_changes)
+            if variance_rate_change <= self._EPSILON:
+                rate_beta = 0.0
+            else:
+                rate_beta = (
+                    self._covariance(rate_changes, log_returns) / variance_rate_change
+                )
+            drift = self._mean(log_returns) - rate_beta * self._mean(rate_changes)
+            residuals = {
+                index: log_return - drift - rate_beta * rate_change
+                for index, rate_change, log_return in observations
+            }
+        except (OverflowError, ValueError):
+            return None
         if not math.isfinite(drift) or not math.isfinite(rate_beta):
             return None
-
-        residuals = {
-            index: log_return - drift - rate_beta * rate_change
-            for index, rate_change, log_return in observations
-        }
+        if not all(math.isfinite(residual) for residual in residuals.values()):
+            return None
         return drift, rate_beta, residuals
 
     def _set_joint_residual_estimates(
@@ -727,10 +791,16 @@ class MarketMaker:
 
         ajarai_values = [ajarai_residuals[index] for index in common_indices]
         theriodic_values = [theriodic_residuals[index] for index in common_indices]
-        ajarai_variance = max(0.0, self._variance(ajarai_values))
-        theriodic_variance = max(0.0, self._variance(theriodic_values))
-        covariance = self._covariance(ajarai_values, theriodic_values)
-        if not all(math.isfinite(value) for value in (ajarai_variance, theriodic_variance, covariance)):
+        try:
+            ajarai_variance = max(0.0, self._variance(ajarai_values))
+            theriodic_variance = max(0.0, self._variance(theriodic_values))
+            covariance = self._covariance(ajarai_values, theriodic_values)
+        except (OverflowError, ValueError):
+            return
+        if not all(
+            math.isfinite(value)
+            for value in (ajarai_variance, theriodic_variance, covariance)
+        ):
             return
 
         estimates["sector_std_dev"] = 1.0
@@ -759,9 +829,8 @@ class MarketMaker:
             estimates["theriodic_idio_std_dev"] = 0.0
 
     @classmethod
-    def _residual_std_dev(cls, residuals: Any) -> float:
-        values = list(residuals)
-        return math.sqrt(max(0.0, cls._variance(values))) if values else 0.0
+    def _residual_std_dev(cls, residuals: list[float]) -> float:
+        return math.sqrt(max(0.0, cls._variance(residuals))) if residuals else 0.0
 
     @staticmethod
     def _mean(values: list[float]) -> float:

@@ -58,7 +58,9 @@ def make_option(
     )
 
 
-def make_market_maker(*, cash: float = 100.0, options: list[BinaryOption] | None = None) -> MarketMaker:
+def make_market_maker(
+    *, cash: float = 100.0, options: list[BinaryOption] | None = None
+) -> MarketMaker:
     if options is None:
         options = [make_option()]
     return MarketMaker(
@@ -75,14 +77,20 @@ def make_market_maker(*, cash: float = 100.0, options: list[BinaryOption] | None
 def estimated_parameters(market_maker: MarketMaker) -> MarketParameters:
     """Find the private parameter snapshot without prescribing its attribute name."""
     candidates = [
-        value for value in vars(market_maker).values() if isinstance(value, MarketParameters)
+        value
+        for value in vars(market_maker).values()
+        if isinstance(value, MarketParameters)
     ]
     if not candidates:
-        raise AssertionError("MarketMaker should retain its current MarketParameters estimate")
+        raise AssertionError(
+            "MarketMaker should retain its current MarketParameters estimate"
+        )
     return candidates[-1]
 
 
-def assert_valid_parameters(test_case: unittest.TestCase, parameters: MarketParameters) -> None:
+def assert_valid_parameters(
+    test_case: unittest.TestCase, parameters: MarketParameters
+) -> None:
     for field in fields(MarketParameters):
         test_case.assertTrue(
             math.isfinite(getattr(parameters, field.name)),
@@ -109,7 +117,9 @@ def history_from_returns(
     theriodic_values = [100.0]
     for ajarai_return, theriodic_return in zip(ajarai_returns, theriodic_returns):
         ajarai_values.append(round(ajarai_values[-1] * math.exp(ajarai_return), 2))
-        theriodic_values.append(round(theriodic_values[-1] * math.exp(theriodic_return), 2))
+        theriodic_values.append(
+            round(theriodic_values[-1] * math.exp(theriodic_return), 2)
+        )
     return MarketHistory(
         {
             FED_FUNDS_RATE_UNDERLYING_ID: (2.0,) * len(ajarai_values),
@@ -126,6 +136,11 @@ def reference_prices(
     number_of_paths: int = 80_000,
 ) -> list[float]:
     """Independent seeded oracle using the supplied market process itself."""
+    if not options:
+        raise ValueError("reference pricing requires at least one option")
+    if len({option.steps_until_expiry for option in options}) != 1:
+        raise ValueError("reference-priced options must have the same expiry")
+
     initial_values = {
         FED_FUNDS_RATE_UNDERLYING_ID: 2.0,
         AJARAI_UNDERLYING_ID: 100.0,
@@ -147,6 +162,16 @@ def reference_prices(
 
 
 class MarketMakerPricingTests(unittest.TestCase):
+    def test_reference_prices_rejects_an_empty_option_list(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one option"):
+            reference_prices(make_parameters(), [])
+
+    def test_reference_prices_rejects_mixed_expiries(self) -> None:
+        options = [make_option(option_id=1, steps=1), make_option(option_id=2, steps=2)]
+
+        with self.assertRaisesRegex(ValueError, "same expiry"):
+            reference_prices(make_parameters(), options)
+
     def test_name_is_fixed_and_nonempty(self) -> None:
         self.assertEqual(make_market_maker().name, "SimpleSafeMM")
 
@@ -187,7 +212,9 @@ class MarketMakerPricingTests(unittest.TestCase):
 
         first = market_maker.price_option_from_parameters(parameters, option)
         second = market_maker.price_option_from_parameters(parameters, option)
-        equivalent = market_maker.price_option_from_parameters(parameters, equivalent_option)
+        equivalent = market_maker.price_option_from_parameters(
+            parameters, equivalent_option
+        )
 
         self.assertEqual(first, second)
         self.assertEqual(first, equivalent)
@@ -236,7 +263,9 @@ class MarketMakerPricingTests(unittest.TestCase):
         market_maker = make_market_maker(options=[option])
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            prices = list(executor.map(lambda _: market_maker.price_option(option), range(8)))
+            prices = list(
+                executor.map(lambda _: market_maker.price_option(option), range(8))
+            )
 
         self.assertTrue(all(price == prices[0] for price in prices))
         self.assertGreaterEqual(prices[0], 0.0)
@@ -352,6 +381,24 @@ class MarketProcessTests(unittest.TestCase):
 
 
 class MarketMakerWarmUpTests(unittest.TestCase):
+    def test_extreme_finite_rate_history_retains_fallback_parameters(self) -> None:
+        market_maker = make_market_maker()
+        fallback_parameters = estimated_parameters(market_maker)
+        rates = (0.0, 1e308, 0.0, 1e308, 0.0, 1e308)
+        history = MarketHistory(
+            {
+                FED_FUNDS_RATE_UNDERLYING_ID: rates,
+                AJARAI_UNDERLYING_ID: (100.0,) * len(rates),
+                THERIODIC_UNDERLYING_ID: (100.0,) * len(rates),
+            }
+        )
+
+        market_maker.warm_up(history)
+
+        parameters = estimated_parameters(market_maker)
+        self.assertEqual(parameters, fallback_parameters)
+        assert_valid_parameters(self, parameters)
+
     def test_short_or_incomplete_history_keeps_valid_fallbacks(self) -> None:
         histories = [
             MarketHistory({}),
@@ -509,7 +556,9 @@ class MarketMakerWarmUpTests(unittest.TestCase):
 
         assert_valid_parameters(self, estimated_parameters(market_maker))
 
-    def test_extreme_positive_company_history_does_not_overflow_log_returns(self) -> None:
+    def test_extreme_positive_company_history_does_not_overflow_log_returns(
+        self,
+    ) -> None:
         values = (1e308, 1e-308, 1e308, 1e-308, 1e308, 1e-308)
         history = MarketHistory(
             {
@@ -540,14 +589,18 @@ class MarketMakerQuoteTests(unittest.TestCase):
         for fair_value in (0.0, 0.001, 0.999, 1.0):
             with self.subTest(fair_value=fair_value):
                 market_maker = make_market_maker(options=[option])
-                with patch.object(market_maker, "price_option", return_value=fair_value):
+                with patch.object(
+                    market_maker, "price_option", return_value=fair_value
+                ):
                     quote = market_maker.quote(option, counterparty_id=77)
 
                 self.assertGreaterEqual(quote.bid_price, 0.0)
                 self.assertLess(quote.bid_price, quote.offer_price)
                 self.assertLessEqual(quote.offer_price, 1.0)
                 self.assertEqual(round(quote.bid_price * 100), quote.bid_price * 100)
-                self.assertEqual(round(quote.offer_price * 100), quote.offer_price * 100)
+                self.assertEqual(
+                    round(quote.offer_price * 100), quote.offer_price * 100
+                )
 
     def test_inventory_skew_moves_both_prices_away_from_existing_position(self) -> None:
         option = make_option()
@@ -580,7 +633,9 @@ class MarketMakerQuoteTests(unittest.TestCase):
 
         self.assertEqual((long_quote.bid_price, long_quote.bid_quantity), (0.0, 1))
         self.assertEqual(long_quote.offer_quantity, 2)
-        self.assertEqual((short_quote.offer_price, short_quote.offer_quantity), (1.0, 1))
+        self.assertEqual(
+            (short_quote.offer_price, short_quote.offer_quantity), (1.0, 1)
+        )
         self.assertEqual(short_quote.bid_quantity, 2)
 
     def test_quantities_are_bounded_by_full_fill_risk_budget(self) -> None:
@@ -631,7 +686,9 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
                 )
             )
 
-    def test_fok_rejects_wrong_contract_inventory_breach_and_full_fill_risk(self) -> None:
+    def test_fok_rejects_wrong_contract_inventory_breach_and_full_fill_risk(
+        self,
+    ) -> None:
         option = make_option()
 
         wrong_id_maker = make_market_maker(options=[option])
