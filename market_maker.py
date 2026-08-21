@@ -263,19 +263,19 @@ class Underlying:
 
 
 class MarketMaker:
-    _LIVE_PATHS: Final[int] = 4_000
-    _THEO_PATHS: Final[int] = 25_000
-    _MONTE_CARLO_SEED: Final[int] = 8_675_309
-    _HALF_SPREAD: Final[float] = 0.02
-    _FOK_EDGE: Final[float] = 0.02
-    _BASE_QUANTITY: Final[int] = 2
-    _INVENTORY_LIMIT: Final[int] = 10
-    _SKEW_PER_CONTRACT: Final[float] = 0.005
-    _MAX_INVENTORY_SKEW: Final[float] = 0.05
-    _MIN_ESTIMATION_TRANSITIONS: Final[int] = 5
-    _PROBABILITY_FLOOR: Final[float] = 0.001
-    _EPSILON: Final[float] = 1e-12
-    _MAX_SIMULATED_VALUE: Final[float] = 1e300
+    LIVE_PATHS: Final[int] = 4_000
+    THEO_PATHS: Final[int] = 25_000
+    MONTE_CARLO_SEED: Final[int] = 8_675_309
+    HALF_SPREAD: Final[float] = 0.02
+    FOK_EDGE: Final[float] = 0.02
+    BASE_QUANTITY: Final[int] = 2
+    INVENTORY_LIMIT: Final[int] = 10
+    SKEW_PER_CONTRACT: Final[float] = 0.005
+    MAX_INVENTORY_SKEW: Final[float] = 0.05
+    MIN_ESTIMATION_TRANSITIONS: Final[int] = 5
+    PROBABILITY_FLOOR: Final[float] = 0.001
+    EPSILON: Final[float] = 1e-12
+    MAX_SIMULATED_VALUE: Final[float] = 1e300
 
     def __init__(
         self,
@@ -287,8 +287,8 @@ class MarketMaker:
         self.active_option_state: list[BinaryOption] = option_initial_state
         self.cash_balance: float = cash_balance
         self.position: Position = Position()
-        self._remaining_risk_budget: float = max(0.0, cash_balance)
-        self._estimated_parameters: MarketParameters = self._default_parameters()
+        self.remaining_risk_budget: float = max(0.0, cash_balance)
+        self.estimated_parameters: MarketParameters = self.default_parameters()
 
     def on_step_advance(
         self,
@@ -306,8 +306,8 @@ class MarketMaker:
             maximum_loss = max(0.0, price) * quantity
         else:
             maximum_loss = max(0.0, 1.0 - price) * abs(quantity)
-        self._remaining_risk_budget = max(
-            0.0, self._remaining_risk_budget - maximum_loss
+        self.remaining_risk_budget = max(
+            0.0, self.remaining_risk_budget - maximum_loss
         )
 
     @property
@@ -315,23 +315,23 @@ class MarketMaker:
         return "SimpleSafeMM"
 
     def price_option(self, option: BinaryOption) -> float:
-        return self._price_with_parameters(
-            self._estimated_parameters, option, self._LIVE_PATHS
+        return self.price_with_parameters(
+            self.estimated_parameters, option, self.LIVE_PATHS
         )
 
     def price_option_from_parameters(
         self, market_parameters: MarketParameters, option: BinaryOption
     ) -> float:
-        return self._price_with_parameters(market_parameters, option, self._THEO_PATHS)
+        return self.price_with_parameters(market_parameters, option, self.THEO_PATHS)
 
     def quote(self, option: BinaryOption, counterparty_id: int) -> Quote:
-        reservation_price = self._reservation_price(option)
+        reservation_price = self.reservation_price(option)
         bid_price = max(
             0.0,
             min(
                 0.99,
                 math.floor(
-                    (reservation_price - self._HALF_SPREAD) * 100 + self._EPSILON
+                    (reservation_price - self.HALF_SPREAD) * 100 + self.EPSILON
                 )
                 / 100,
             ),
@@ -340,7 +340,7 @@ class MarketMaker:
             0.01,
             min(
                 1.0,
-                math.ceil((reservation_price + self._HALF_SPREAD) * 100 - self._EPSILON)
+                math.ceil((reservation_price + self.HALF_SPREAD) * 100 - self.EPSILON)
                 / 100,
             ),
         )
@@ -351,13 +351,13 @@ class MarketMaker:
             else:
                 bid_price = round(bid_price - 0.01, 2)
 
-        position = self._position(option.option_id)
-        bid_quantity = self._safe_quote_quantity(
-            inventory_room=self._INVENTORY_LIMIT - position,
+        position = self.position(option.option_id)
+        bid_quantity = self.safe_quote_quantity(
+            inventory_room=self.INVENTORY_LIMIT - position,
             maximum_loss_per_contract=bid_price,
         )
-        offer_quantity = self._safe_quote_quantity(
-            inventory_room=self._INVENTORY_LIMIT + position,
+        offer_quantity = self.safe_quote_quantity(
+            inventory_room=self.INVENTORY_LIMIT + position,
             maximum_loss_per_contract=1.0 - offer_price,
         )
 
@@ -379,32 +379,32 @@ class MarketMaker:
         if fok_order.option_id != option.option_id:
             return False
 
-        reservation_price = self._reservation_price(option)
-        current_position = self._position(option.option_id)
+        reservation_price = self.reservation_price(option)
+        current_position = self.position(option.option_id)
 
         if fok_order.order_type == OrderType.BUY:
             resulting_position = current_position - fok_order.quantity
             has_edge = (
-                fok_order.price + self._EPSILON >= reservation_price + self._FOK_EDGE
+                fok_order.price + self.EPSILON >= reservation_price + self.FOK_EDGE
             )
             maximum_loss = max(0.0, 1.0 - fok_order.price) * fok_order.quantity
         elif fok_order.order_type == OrderType.SELL:
             resulting_position = current_position + fok_order.quantity
             has_edge = (
-                fok_order.price <= reservation_price - self._FOK_EDGE + self._EPSILON
+                fok_order.price <= reservation_price - self.FOK_EDGE + self.EPSILON
             )
             maximum_loss = max(0.0, fok_order.price) * fok_order.quantity
         else:
             return False
 
-        if abs(resulting_position) > self._INVENTORY_LIMIT:
+        if abs(resulting_position) > self.INVENTORY_LIMIT:
             return False
-        if maximum_loss > self._remaining_risk_budget + self._EPSILON:
+        if maximum_loss > self.remaining_risk_budget + self.EPSILON:
             return False
         return has_edge
 
     def warm_up(self, market_history: MarketHistory) -> None:
-        defaults = self._default_parameters()
+        defaults = self.default_parameters()
         estimates: dict[str, float] = {
             "ajarai_drift": defaults.ajarai_drift,
             "ajarai_idio_std_dev": defaults.ajarai_idio_std_dev,
@@ -425,7 +425,7 @@ class MarketMaker:
         histories = market_history.values_by_underlying_id
         rates = histories.get(FED_FUNDS_RATE_UNDERLYING_ID)
         if rates is not None:
-            rate_estimate = self._estimate_rate_parameters(rates)
+            rate_estimate = self.estimate_rate_parameters(rates)
             if rate_estimate is not None:
                 up_probability, down_probability, reversion_strength = rate_estimate
                 estimates["rate_up_probability"] = up_probability
@@ -438,7 +438,7 @@ class MarketMaker:
                 values = histories.get(underlying_id)
                 if values is None:
                     continue
-                result = self._estimate_company_parameters(rates, values)
+                result = self.estimate_company_parameters(rates, values)
                 if result is not None:
                     company_results[underlying_id] = result
 
@@ -452,18 +452,18 @@ class MarketMaker:
             estimates["theriodic_rate_beta"] = theriodic_result[1]
 
         if ajarai_result is not None and theriodic_result is not None:
-            self._set_joint_residual_estimates(
+            self.set_joint_residual_estimates(
                 estimates, ajarai_result[2], theriodic_result[2]
             )
         else:
             if ajarai_result is not None:
                 estimates["ajarai_sector_beta"] = 0.0
-                estimates["ajarai_idio_std_dev"] = self._residual_std_dev(
+                estimates["ajarai_idio_std_dev"] = self.residual_std_dev(
                     list(ajarai_result[2].values())
                 )
             if theriodic_result is not None:
                 estimates["theriodic_sector_beta"] = 0.0
-                estimates["theriodic_idio_std_dev"] = self._residual_std_dev(
+                estimates["theriodic_idio_std_dev"] = self.residual_std_dev(
                     list(theriodic_result[2].values())
                 )
 
@@ -474,12 +474,12 @@ class MarketMaker:
         if all(
             math.isfinite(getattr(candidate, field_name)) for field_name in estimates
         ):
-            self._estimated_parameters = candidate
+            self.estimated_parameters = candidate
         else:
-            self._estimated_parameters = defaults
+            self.estimated_parameters = defaults
 
     @staticmethod
-    def _default_parameters() -> MarketParameters:
+    def default_parameters() -> MarketParameters:
         return MarketParameters(
             ajarai_drift=0.0,
             ajarai_idio_std_dev=0.02,
@@ -497,30 +497,30 @@ class MarketMaker:
             rate_target=2.0,
         )
 
-    def _current_values(self) -> dict[int, float]:
+    def current_values(self) -> dict[int, float]:
         return {
             underlying.underlying_id: underlying.value
             for underlying in self.underlying_state
         }
 
-    def _price_with_parameters(
+    def price_with_parameters(
         self,
         market_parameters: MarketParameters,
         option: BinaryOption,
         number_of_paths: int,
     ) -> float:
-        current_values = self._current_values()
+        current_values = self.current_values()
         if option.steps_until_expiry == 0:
             return option.expiry_valuation(current_values)
 
         if all(
             leg.underlying_id == FED_FUNDS_RATE_UNDERLYING_ID for leg in option.legs
         ):
-            probability = self._price_rate_option_exactly(
+            probability = self.price_rate_option_exactly(
                 market_parameters, option, current_values
             )
         else:
-            probability = self._price_company_option_by_simulation(
+            probability = self.price_company_option_by_simulation(
                 market_parameters,
                 option,
                 current_values,
@@ -529,7 +529,7 @@ class MarketMaker:
         return min(max(probability, 0.0), 1.0)
 
     @staticmethod
-    def _price_rate_option_exactly(
+    def price_rate_option_exactly(
         market_parameters: MarketParameters,
         option: BinaryOption,
         current_values: dict[int, float],
@@ -559,14 +559,14 @@ class MarketMaker:
             if option.expiry_valuation({FED_FUNDS_RATE_UNDERLYING_ID: rate_value})
         )
 
-    def _price_company_option_by_simulation(
+    def price_company_option_by_simulation(
         self,
         market_parameters: MarketParameters,
         option: BinaryOption,
         current_values: dict[int, float],
         number_of_paths: int,
     ) -> float:
-        random_generator = random.Random(self._MONTE_CARLO_SEED)
+        random_generator = random.Random(self.MONTE_CARLO_SEED)
         in_the_money_paths = 0
 
         for _ in range(number_of_paths):
@@ -590,7 +590,7 @@ class MarketMaker:
                 )
                 path_values = {
                     FED_FUNDS_RATE_UNDERLYING_ID: next_rate,
-                    AJARAI_UNDERLYING_ID: self._advance_company_with_generator(
+                    AJARAI_UNDERLYING_ID: self.advance_company_with_generator(
                         random_generator,
                         path_values[AJARAI_UNDERLYING_ID],
                         rate_change,
@@ -600,7 +600,7 @@ class MarketMaker:
                         sector_beta=market_parameters.ajarai_sector_beta,
                         idio_std_dev=market_parameters.ajarai_idio_std_dev,
                     ),
-                    THERIODIC_UNDERLYING_ID: self._advance_company_with_generator(
+                    THERIODIC_UNDERLYING_ID: self.advance_company_with_generator(
                         random_generator,
                         path_values[THERIODIC_UNDERLYING_ID],
                         rate_change,
@@ -616,7 +616,7 @@ class MarketMaker:
         return in_the_money_paths / number_of_paths
 
     @classmethod
-    def _advance_company_with_generator(
+    def advance_company_with_generator(
         cls,
         random_generator: random.Random,
         current_value: float,
@@ -645,33 +645,33 @@ class MarketMaker:
             return cls._MAX_SIMULATED_VALUE if next_value > 0.0 else 0.0
         return round(max(0.0, next_value), 2)
 
-    def _reservation_price(self, option: BinaryOption) -> float:
+    def reservation_price(self, option: BinaryOption) -> float:
         fair_value = self.price_option(option)
-        inventory = self._position(option.option_id)
+        inventory = self.position(option.option_id)
         inventory_skew = min(
-            max(inventory * self._SKEW_PER_CONTRACT, -self._MAX_INVENTORY_SKEW),
-            self._MAX_INVENTORY_SKEW,
+            max(inventory * self.SKEW_PER_CONTRACT, -self.MAX_INVENTORY_SKEW),
+            self.MAX_INVENTORY_SKEW,
         )
         return min(max(fair_value - inventory_skew, 0.0), 1.0)
 
-    def _position(self, option_id: int) -> int:
+    def position(self, option_id: int) -> int:
         return self.position.option_quantity_by_option_id.get(option_id, 0)
 
-    def _safe_quote_quantity(
+    def safe_quote_quantity(
         self, *, inventory_room: int, maximum_loss_per_contract: float
     ) -> int:
-        if inventory_room <= 0 or self._remaining_risk_budget <= self._EPSILON:
+        if inventory_room <= 0 or self.remaining_risk_budget <= self.EPSILON:
             return 0
-        if maximum_loss_per_contract <= self._EPSILON:
-            affordable_quantity = self._BASE_QUANTITY
+        if maximum_loss_per_contract <= self.EPSILON:
+            affordable_quantity = self.BASE_QUANTITY
         else:
             affordable_quantity = math.floor(
-                (self._remaining_risk_budget + self._EPSILON)
+                (self.remaining_risk_budget + self.EPSILON)
                 / maximum_loss_per_contract
             )
-        return max(0, min(self._BASE_QUANTITY, inventory_room, affordable_quantity))
+        return max(0, min(self.BASE_QUANTITY, inventory_room, affordable_quantity))
 
-    def _estimate_rate_parameters(
+    def estimate_rate_parameters(
         self, rate_values: tuple[float, ...]
     ) -> tuple[float, float, float] | None:
         valid_transitions = [
@@ -680,30 +680,30 @@ class MarketMaker:
             if math.isfinite(rate_values[index])
             and math.isfinite(rate_values[index + 1])
         ]
-        if len(valid_transitions) < self._MIN_ESTIMATION_TRANSITIONS:
+        if len(valid_transitions) < self.MIN_ESTIMATION_TRANSITIONS:
             return None
 
         target = 2.0
         distances = [target - current_rate for current_rate, _ in valid_transitions]
         up_indicators = [
-            1.0 if next_rate > current_rate + self._EPSILON else 0.0
+            1.0 if next_rate > current_rate + self.EPSILON else 0.0
             for current_rate, next_rate in valid_transitions
         ]
         down_indicators = [
-            1.0 if next_rate < current_rate - self._EPSILON else 0.0
+            1.0 if next_rate < current_rate - self.EPSILON else 0.0
             for current_rate, next_rate in valid_transitions
         ]
 
         try:
-            mean_distance = self._mean(distances)
-            variance_distance = self._variance(distances)
-            mean_up = self._mean(up_indicators)
-            mean_down = self._mean(down_indicators)
-            if variance_distance <= self._EPSILON:
-                reversion_strength = self._default_parameters().rate_reversion_strength
+            mean_distance = self.mean(distances)
+            variance_distance = self.variance(distances)
+            mean_up = self.mean(up_indicators)
+            mean_down = self.mean(down_indicators)
+            if variance_distance <= self.EPSILON:
+                reversion_strength = self.default_parameters().rate_reversion_strength
             else:
-                covariance_up = self._covariance(distances, up_indicators)
-                covariance_down = self._covariance(distances, down_indicators)
+                covariance_up = self.covariance(distances, up_indicators)
+                covariance_down = self.covariance(distances, down_indicators)
                 reversion_strength = min(
                     max(
                         (covariance_up - covariance_down) / (2.0 * variance_distance),
@@ -721,8 +721,8 @@ class MarketMaker:
             for value in (up_probability, down_probability, reversion_strength)
         ):
             return None
-        up_probability = max(up_probability, self._PROBABILITY_FLOOR)
-        down_probability = max(down_probability, self._PROBABILITY_FLOOR)
+        up_probability = max(up_probability, self.PROBABILITY_FLOOR)
+        down_probability = max(down_probability, self.PROBABILITY_FLOOR)
         probability_sum = up_probability + down_probability
         if probability_sum > 0.999:
             scale = 0.999 / probability_sum
@@ -730,7 +730,7 @@ class MarketMaker:
             down_probability *= scale
         return up_probability, down_probability, reversion_strength
 
-    def _estimate_company_parameters(
+    def estimate_company_parameters(
         self,
         rate_values: tuple[float, ...],
         company_values: tuple[float, ...],
@@ -753,20 +753,20 @@ class MarketMaker:
             if math.isfinite(rate_change) and math.isfinite(log_return):
                 observations.append((index, rate_change, log_return))
 
-        if len(observations) < self._MIN_ESTIMATION_TRANSITIONS:
+        if len(observations) < self.MIN_ESTIMATION_TRANSITIONS:
             return None
 
         rate_changes = [observation[1] for observation in observations]
         log_returns = [observation[2] for observation in observations]
         try:
-            variance_rate_change = self._variance(rate_changes)
-            if variance_rate_change <= self._EPSILON:
+            variance_rate_change = self.variance(rate_changes)
+            if variance_rate_change <= self.EPSILON:
                 rate_beta = 0.0
             else:
                 rate_beta = (
-                    self._covariance(rate_changes, log_returns) / variance_rate_change
+                    self.covariance(rate_changes, log_returns) / variance_rate_change
                 )
-            drift = self._mean(log_returns) - rate_beta * self._mean(rate_changes)
+            drift = self.mean(log_returns) - rate_beta * self.mean(rate_changes)
             residuals = {
                 index: log_return - drift - rate_beta * rate_change
                 for index, rate_change, log_return in observations
@@ -779,22 +779,22 @@ class MarketMaker:
             return None
         return drift, rate_beta, residuals
 
-    def _set_joint_residual_estimates(
+    def set_joint_residual_estimates(
         self,
         estimates: dict[str, float],
         ajarai_residuals: dict[int, float],
         theriodic_residuals: dict[int, float],
     ) -> None:
         common_indices = sorted(ajarai_residuals.keys() & theriodic_residuals.keys())
-        if len(common_indices) < self._MIN_ESTIMATION_TRANSITIONS:
+        if len(common_indices) < self.MIN_ESTIMATION_TRANSITIONS:
             return
 
         ajarai_values = [ajarai_residuals[index] for index in common_indices]
         theriodic_values = [theriodic_residuals[index] for index in common_indices]
         try:
-            ajarai_variance = max(0.0, self._variance(ajarai_values))
-            theriodic_variance = max(0.0, self._variance(theriodic_values))
-            covariance = self._covariance(ajarai_values, theriodic_values)
+            ajarai_variance = max(0.0, self.variance(ajarai_values))
+            theriodic_variance = max(0.0, self.variance(theriodic_values))
+            covariance = self.covariance(ajarai_values, theriodic_values)
         except (OverflowError, ValueError):
             return
         if not all(
@@ -804,7 +804,7 @@ class MarketMaker:
             return
 
         estimates["sector_std_dev"] = 1.0
-        if ajarai_variance >= theriodic_variance and ajarai_variance > self._EPSILON:
+        if ajarai_variance >= theriodic_variance and ajarai_variance > self.EPSILON:
             ajarai_loading = math.sqrt(ajarai_variance)
             theriodic_loading = covariance / ajarai_loading
             estimates["ajarai_sector_beta"] = ajarai_loading
@@ -813,7 +813,7 @@ class MarketMaker:
             estimates["theriodic_idio_std_dev"] = math.sqrt(
                 max(0.0, theriodic_variance - theriodic_loading**2)
             )
-        elif theriodic_variance > self._EPSILON:
+        elif theriodic_variance > self.EPSILON:
             theriodic_loading = math.sqrt(theriodic_variance)
             ajarai_loading = covariance / theriodic_loading
             estimates["ajarai_sector_beta"] = ajarai_loading
@@ -829,26 +829,26 @@ class MarketMaker:
             estimates["theriodic_idio_std_dev"] = 0.0
 
     @classmethod
-    def _residual_std_dev(cls, residuals: list[float]) -> float:
-        return math.sqrt(max(0.0, cls._variance(residuals))) if residuals else 0.0
+    def residual_std_dev(cls, residuals: list[float]) -> float:
+        return math.sqrt(max(0.0, cls.variance(residuals))) if residuals else 0.0
 
     @staticmethod
-    def _mean(values: list[float]) -> float:
+    def mean(values: list[float]) -> float:
         return math.fsum(values) / len(values)
 
     @classmethod
-    def _variance(cls, values: list[float]) -> float:
+    def variance(cls, values: list[float]) -> float:
         if not values:
             return 0.0
-        mean_value = cls._mean(values)
+        mean_value = cls.mean(values)
         return math.fsum((value - mean_value) ** 2 for value in values) / len(values)
 
     @classmethod
-    def _covariance(cls, left: list[float], right: list[float]) -> float:
+    def covariance(cls, left: list[float], right: list[float]) -> float:
         if not left or len(left) != len(right):
             return 0.0
-        left_mean = cls._mean(left)
-        right_mean = cls._mean(right)
+        left_mean = cls.mean(left)
+        right_mean = cls.mean(right)
         return math.fsum(
             (left_value - left_mean) * (right_value - right_mean)
             for left_value, right_value in zip(left, right)
