@@ -274,6 +274,8 @@ class MarketMaker:
     MAX_INVENTORY_SKEW: Final[float] = 0.05
     MIN_ESTIMATION_TRANSITIONS: Final[int] = 5
     PROBABILITY_FLOOR: Final[float] = 0.001
+    RATE_REVERSION_PRIOR_TRANSITIONS: Final[float] = 50.0
+    DRIFT_SCALE: Final[float] = 0.005
     EPSILON: Final[float] = 1e-12
     MAX_SIMULATED_VALUE: Final[float] = 1e300
 
@@ -719,7 +721,7 @@ class MarketMaker:
             mean_up = self.mean(up_indicators)
             mean_down = self.mean(down_indicators)
             if variance_distance <= self.EPSILON:
-                reversion_strength = self.default_parameters().rate_reversion_strength
+                reversion_strength = 0.0
             else:
                 covariance_up = self.covariance(distances, up_indicators)
                 covariance_down = self.covariance(distances, down_indicators)
@@ -727,6 +729,10 @@ class MarketMaker:
                     max(0.0, (covariance_up - covariance_down) / (2.0 * variance_distance)),
                     1.0,
                 )
+                history_weight = len(valid_transitions) / (
+                    len(valid_transitions) + self.RATE_REVERSION_PRIOR_TRANSITIONS
+                )
+                reversion_strength *= history_weight
             up_probability = mean_up - reversion_strength * mean_distance
             down_probability = mean_down + reversion_strength * mean_distance
         except (OverflowError, ValueError):
@@ -774,13 +780,39 @@ class MarketMaker:
         log_returns = [observation[2] for observation in observations]
         try:
             variance_rate_change = self.variance(rate_changes)
-            if variance_rate_change <= self.EPSILON:
+            has_rate_variation = variance_rate_change > self.EPSILON
+            if not has_rate_variation:
                 rate_beta = 0.0
             else:
                 rate_beta = (
                     self.covariance(rate_changes, log_returns) / variance_rate_change
                 )
             drift = self.mean(log_returns) - rate_beta * self.mean(rate_changes)
+            preliminary_residuals = {
+                index: log_return - drift - rate_beta * rate_change
+                for index, rate_change, log_return in observations
+            }
+            residual_variance = self.variance(list(preliminary_residuals.values()))
+            observation_count = len(observations)
+            mean_rate_change = self.mean(rate_changes)
+            centered_rate_sum = variance_rate_change * observation_count
+            if has_rate_variation:
+                error_variance = (
+                    residual_variance * observation_count / (observation_count - 2)
+                )
+                drift_standard_error_squared = error_variance * (
+                    1.0 / observation_count
+                    + mean_rate_change**2 / centered_rate_sum
+                )
+            else:
+                error_variance = (
+                    residual_variance * observation_count / (observation_count - 1)
+                )
+                drift_standard_error_squared = error_variance / observation_count
+            drift_scale_squared = self.DRIFT_SCALE**2
+            drift *= drift_scale_squared / (
+                drift_scale_squared + drift_standard_error_squared
+            )
             residuals = {
                 index: log_return - drift - rate_beta * rate_change
                 for index, rate_change, log_return in observations

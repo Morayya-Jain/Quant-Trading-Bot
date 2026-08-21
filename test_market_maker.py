@@ -129,6 +129,35 @@ def history_from_returns(
     )
 
 
+def generated_history(
+    parameters: MarketParameters, number_of_days: int, seed: int
+) -> tuple[MarketHistory, dict[int, float]]:
+    values = {
+        FED_FUNDS_RATE_UNDERLYING_ID: 2.0,
+        AJARAI_UNDERLYING_ID: 100.0,
+        THERIODIC_UNDERLYING_ID: 100.0,
+    }
+    histories = {underlying_id: [value] for underlying_id, value in values.items()}
+    state_before = random.getstate()
+    random.seed(seed)
+    try:
+        for day_number in range(number_of_days):
+            values = parameters.advance_step(values)
+            for underlying_id, value in values.items():
+                histories[underlying_id].append(value)
+    finally:
+        random.setstate(state_before)
+    return (
+        MarketHistory(
+            {
+                underlying_id: tuple(history)
+                for underlying_id, history in histories.items()
+            }
+        ),
+        values,
+    )
+
+
 def reference_prices(
     parameters: MarketParameters,
     options: list[BinaryOption],
@@ -560,6 +589,56 @@ class MarketMakerWarmUpTests(unittest.TestCase):
         self.assertAlmostEqual(parameters.rate_down_probability, 0.001)
         self.assertAlmostEqual(market_maker.price_option(option), 0.001)
 
+    def test_static_rate_history_away_from_target_does_not_invent_reversion(
+        self,
+    ) -> None:
+        rates = (3.0,) * 20
+        history = MarketHistory(
+            {
+                FED_FUNDS_RATE_UNDERLYING_ID: rates,
+                AJARAI_UNDERLYING_ID: (100.0,) * len(rates),
+                THERIODIC_UNDERLYING_ID: (100.0,) * len(rates),
+            }
+        )
+        market_maker = make_market_maker()
+
+        market_maker.warm_up(history)
+
+        up_probability, down_probability = (
+            estimated_parameters(market_maker).tilted_rate_probabilities(3.0)
+        )
+        self.assertLessEqual(up_probability, 0.005)
+        self.assertLessEqual(down_probability, 0.005)
+
+    def test_short_rate_history_produces_a_stable_option_price(self) -> None:
+        true_parameters = make_parameters(
+            rate_up_probability=0.25,
+            rate_down_probability=0.15,
+            rate_reversion_strength=0.03,
+        )
+        history, current_values = generated_history(true_parameters, 100, seed=44)
+        option = make_option(
+            underlying_id=FED_FUNDS_RATE_UNDERLYING_ID,
+            strike=3.75,
+            steps=3,
+        )
+        market_maker = MarketMaker(
+            [
+                Underlying("FED", FED_FUNDS_RATE_UNDERLYING_ID, current_values[1]),
+                Underlying("AJR", AJARAI_UNDERLYING_ID, current_values[2]),
+                Underlying("THR", THERIODIC_UNDERLYING_ID, current_values[3]),
+            ],
+            [option],
+            100.0,
+        )
+
+        true_price = market_maker.price_option_from_parameters(
+            true_parameters, option
+        )
+        market_maker.warm_up(history)
+
+        self.assertAlmostEqual(market_maker.price_option(option), true_price, delta=0.05)
+
     def test_rate_estimation_skips_isolated_nonfinite_observations(self) -> None:
         rates = (2.0, 2.25, 2.5, 2.75, 3.0, math.nan, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25)
         history = MarketHistory(
@@ -598,6 +677,193 @@ class MarketMakerWarmUpTests(unittest.TestCase):
         self.assertAlmostEqual(parameters.ajarai_rate_beta, 0.04, delta=0.005)
         self.assertAlmostEqual(parameters.theriodic_drift, -0.002, delta=0.001)
         self.assertAlmostEqual(parameters.theriodic_rate_beta, -0.03, delta=0.005)
+
+    def test_tiny_rate_variation_is_treated_as_static_for_company_estimates(
+        self,
+    ) -> None:
+        returns = [0.025, -0.005, 0.02, -0.015, 0.015, -0.01]
+        company_values = [100.0]
+        for log_return in returns:
+            company_values.append(
+                round(company_values[-1] * math.exp(log_return), 2)
+            )
+        tiny_rate_moves = [9e-7, -9e-7, 9e-7, -9e-7, 9e-7, -9e-7]
+        tiny_rates = [2.0]
+        for rate_move in tiny_rate_moves:
+            tiny_rates.append(tiny_rates[-1] + rate_move)
+        static_rates = (2.0,) * len(tiny_rates)
+        market_maker = make_market_maker()
+
+        static_result = market_maker.estimate_company_parameters(
+            static_rates, tuple(company_values)
+        )
+        tiny_move_result = market_maker.estimate_company_parameters(
+            tuple(tiny_rates), tuple(company_values)
+        )
+
+        self.assertIsNotNone(static_result)
+        self.assertIsNotNone(tiny_move_result)
+        self.assertAlmostEqual(tiny_move_result[0], static_result[0], places=12)
+        self.assertEqual(tiny_move_result[1], 0.0)
+
+    def test_short_company_history_produces_a_stable_option_price(self) -> None:
+        true_parameters = make_parameters(
+            ajarai_drift=0.002,
+            ajarai_idio_std_dev=0.03,
+            ajarai_rate_beta=-0.08,
+            ajarai_sector_beta=0.04,
+            rate_down_probability=0.15,
+            rate_reversion_strength=0.03,
+            rate_up_probability=0.25,
+            sector_std_dev=0.7,
+            theriodic_drift=-0.001,
+            theriodic_idio_std_dev=0.024,
+            theriodic_rate_beta=0.04,
+            theriodic_sector_beta=0.028,
+        )
+        history, current_values = generated_history(true_parameters, 25, seed=26)
+        option = make_option(strike=current_values[AJARAI_UNDERLYING_ID], steps=1)
+        market_maker = MarketMaker(
+            [
+                Underlying(
+                    "FED",
+                    FED_FUNDS_RATE_UNDERLYING_ID,
+                    current_values[FED_FUNDS_RATE_UNDERLYING_ID],
+                ),
+                Underlying(
+                    "AJR",
+                    AJARAI_UNDERLYING_ID,
+                    current_values[AJARAI_UNDERLYING_ID],
+                ),
+                Underlying(
+                    "THR",
+                    THERIODIC_UNDERLYING_ID,
+                    current_values[THERIODIC_UNDERLYING_ID],
+                ),
+            ],
+            [option],
+            100.0,
+        )
+
+        true_price = market_maker.price_option_from_parameters(
+            true_parameters, option
+        )
+        market_maker.warm_up(history)
+
+        self.assertAlmostEqual(market_maker.price_option(option), true_price, delta=0.06)
+        self.assertLess(estimated_parameters(market_maker).ajarai_rate_beta, -0.02)
+
+    def test_company_regularization_preserves_variance_and_covariance(self) -> None:
+        rate_moves = [
+            0.25,
+            0.0,
+            0.0,
+            0.0,
+            -0.25,
+            0.0,
+            0.0,
+            0.0,
+            0.25,
+            0.0,
+            0.0,
+            0.0,
+            -0.25,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        ajarai_noise = [
+            0.03,
+            -0.04,
+            0.02,
+            -0.03,
+            0.04,
+            -0.02,
+            0.035,
+            -0.035,
+            -0.025,
+            0.03,
+            -0.04,
+            0.025,
+            -0.03,
+            0.04,
+            -0.02,
+            0.03,
+        ]
+        theriodic_noise = [
+            0.01,
+            -0.015,
+            0.012,
+            -0.01,
+            0.02,
+            -0.012,
+            0.014,
+            -0.016,
+            -0.01,
+            0.012,
+            -0.015,
+            0.01,
+            -0.012,
+            0.018,
+            -0.011,
+            0.013,
+        ]
+        rates = [2.0]
+        ajarai_values = [100.0]
+        theriodic_values = [100.0]
+        ajarai_returns = []
+        theriodic_returns = []
+        for rate_move, ajarai_noise_value, theriodic_noise_value in zip(
+            rate_moves, ajarai_noise, theriodic_noise
+        ):
+            rates.append(round(rates[-1] + rate_move, 2))
+            ajarai_return = 0.30 * rate_move + ajarai_noise_value
+            theriodic_return = -0.12 * rate_move + theriodic_noise_value
+            ajarai_values.append(
+                round(ajarai_values[-1] * math.exp(ajarai_return), 2)
+            )
+            theriodic_values.append(
+                round(theriodic_values[-1] * math.exp(theriodic_return), 2)
+            )
+            ajarai_returns.append(
+                math.log(ajarai_values[-1]) - math.log(ajarai_values[-2])
+            )
+            theriodic_returns.append(
+                math.log(theriodic_values[-1]) - math.log(theriodic_values[-2])
+            )
+
+        market_maker = make_market_maker()
+        market_maker.warm_up(
+            MarketHistory(
+                {
+                    FED_FUNDS_RATE_UNDERLYING_ID: tuple(rates),
+                    AJARAI_UNDERLYING_ID: tuple(ajarai_values),
+                    THERIODIC_UNDERLYING_ID: tuple(theriodic_values),
+                }
+            )
+        )
+
+        parameters = estimated_parameters(market_maker)
+        rate_variance = market_maker.variance(rate_moves)
+        modeled_variance = parameters.ajarai_rate_beta**2 * rate_variance
+        modeled_variance += parameters.ajarai_sector_beta**2
+        modeled_variance += parameters.ajarai_idio_std_dev**2
+        observed_variance = market_maker.variance(ajarai_returns)
+        self.assertGreaterEqual(modeled_variance, 0.98 * observed_variance)
+        modeled_covariance = (
+            parameters.ajarai_rate_beta
+            * parameters.theriodic_rate_beta
+            * rate_variance
+            + parameters.ajarai_sector_beta * parameters.theriodic_sector_beta
+        )
+        observed_covariance = market_maker.covariance(
+            ajarai_returns, theriodic_returns
+        )
+        self.assertAlmostEqual(
+            modeled_covariance,
+            observed_covariance,
+            delta=max(1e-8, abs(observed_covariance) * 0.02),
+        )
 
     def test_large_history_is_processed_without_failure(self) -> None:
         num_days = 10_001
@@ -651,6 +917,24 @@ class MarketMakerQuoteTests(unittest.TestCase):
             quote = market_maker.quote(option, counterparty_id=77)
 
         self.assertEqual(quote, Quote(0.49, 2, 0.51, 2))
+
+    def test_quote_rounds_one_cent_spread_outward_between_pennies(self) -> None:
+        option = make_option()
+        cases = (
+            (0.495, Quote(0.48, 2, 0.51, 2)),
+            (0.496, Quote(0.48, 2, 0.51, 2)),
+            (0.504, Quote(0.49, 2, 0.52, 2)),
+            (0.505, Quote(0.49, 2, 0.52, 2)),
+        )
+        for fair_value, expected_quote in cases:
+            with self.subTest(fair_value=fair_value):
+                market_maker = make_market_maker(options=[option])
+                with patch.object(
+                    market_maker, "price_option", return_value=fair_value
+                ):
+                    quote = market_maker.quote(option, counterparty_id=77)
+
+                self.assertEqual(quote, expected_quote)
 
     def test_quotes_remain_valid_at_probability_boundaries(self) -> None:
         option = make_option()
