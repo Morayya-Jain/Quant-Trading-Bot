@@ -507,6 +507,36 @@ class MarketMakerWarmUpTests(unittest.TestCase):
                 self.assertEqual(parameters.rate_target, 2.0)
                 assert_valid_parameters(self, parameters)
 
+    def test_rate_step_is_estimated_from_repeated_moves(self) -> None:
+        rates = (2.0, 2.5, 2.0, 2.5, 2.0, 2.5, 2.0)
+        history = MarketHistory(
+            {
+                FED_FUNDS_RATE_UNDERLYING_ID: rates,
+                AJARAI_UNDERLYING_ID: (100.0,) * len(rates),
+                THERIODIC_UNDERLYING_ID: (100.0,) * len(rates),
+            }
+        )
+        market_maker = make_market_maker()
+
+        market_maker.warm_up(history)
+
+        self.assertEqual(estimated_parameters(market_maker).rate_step, 0.5)
+
+    def test_single_rate_move_does_not_replace_default_step(self) -> None:
+        rates = (2.0, 2.0, 2.0, 2.5, 2.5, 2.5)
+        history = MarketHistory(
+            {
+                FED_FUNDS_RATE_UNDERLYING_ID: rates,
+                AJARAI_UNDERLYING_ID: (100.0,) * len(rates),
+                THERIODIC_UNDERLYING_ID: (100.0,) * len(rates),
+            }
+        )
+        market_maker = make_market_maker()
+
+        market_maker.warm_up(history)
+
+        self.assertEqual(estimated_parameters(market_maker).rate_step, 0.25)
+
     def test_static_rate_history_estimates_near_zero_move_probabilities(self) -> None:
         rates = (2.0,) * 12
         history = MarketHistory(
@@ -613,14 +643,14 @@ class MarketMakerQuoteTests(unittest.TestCase):
 
         self.assertIsInstance(quote, Quote)
 
-    def test_quote_is_two_cents_around_fair_value(self) -> None:
+    def test_quote_is_one_cent_around_fair_value(self) -> None:
         option = make_option()
         market_maker = make_market_maker(options=[option])
 
         with patch.object(market_maker, "price_option", return_value=0.50):
             quote = market_maker.quote(option, counterparty_id=77)
 
-        self.assertEqual(quote, Quote(0.48, 2, 0.52, 2))
+        self.assertEqual(quote, Quote(0.49, 2, 0.51, 2))
 
     def test_quotes_remain_valid_at_probability_boundaries(self) -> None:
         option = make_option()
@@ -696,6 +726,19 @@ class MarketMakerQuoteTests(unittest.TestCase):
 
         self.assertEqual(quote, Quote(0.0, 1, 1.0, 1))
 
+    def test_exhausted_budget_keeps_zero_loss_side_active(self) -> None:
+        option = make_option()
+        for fair_value, expected_quote in (
+            (0.0, Quote(0.0, 2, 1.0, 1)),
+            (1.0, Quote(0.0, 1, 1.0, 2)),
+        ):
+            with self.subTest(fair_value=fair_value):
+                market_maker = make_market_maker(cash=0.0, options=[option])
+                with patch.object(
+                    market_maker, "price_option", return_value=fair_value
+                ):
+                    self.assertEqual(market_maker.quote(option, 1), expected_quote)
+
 
 class MarketMakerFokAndAccountingTests(unittest.TestCase):
     def test_fok_side_interpretation_and_edge_thresholds(self) -> None:
@@ -705,22 +748,22 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
         with patch.object(market_maker, "price_option", return_value=0.50):
             self.assertTrue(
                 market_maker.respond_to_fok(
-                    option, FokOrder(1, option.option_id, OrderType.BUY, 0.52, 1)
+                    option, FokOrder(1, option.option_id, OrderType.BUY, 0.51, 1)
                 )
             )
             self.assertTrue(
                 market_maker.respond_to_fok(
-                    option, FokOrder(1, option.option_id, OrderType.SELL, 0.48, 1)
-                )
-            )
-            self.assertFalse(
-                market_maker.respond_to_fok(
-                    option, FokOrder(1, option.option_id, OrderType.BUY, 0.51, 1)
-                )
-            )
-            self.assertFalse(
-                market_maker.respond_to_fok(
                     option, FokOrder(1, option.option_id, OrderType.SELL, 0.49, 1)
+                )
+            )
+            self.assertFalse(
+                market_maker.respond_to_fok(
+                    option, FokOrder(1, option.option_id, OrderType.BUY, 0.50, 1)
+                )
+            )
+            self.assertFalse(
+                market_maker.respond_to_fok(
+                    option, FokOrder(1, option.option_id, OrderType.SELL, 0.50, 1)
                 )
             )
 
@@ -794,6 +837,54 @@ class MarketMakerFokAndAccountingTests(unittest.TestCase):
             market_maker.position.option_quantity_by_option_id[option.option_id], -1
         )
         self.assertAlmostEqual(market_maker.remaining_risk_budget, 8.80)
+
+    def test_expiry_releases_collateral_for_long_and_short_trades(self) -> None:
+        expiring_option = make_option(steps=1)
+        next_option = make_option(option_id=102, steps=2)
+        market_maker = make_market_maker(cash=1.0, options=[expiring_option])
+        market_maker.on_trade(
+            expiring_option, price=0.40, quantity=1, counterparty_id=1
+        )
+        market_maker.on_trade(
+            expiring_option, price=0.60, quantity=-1, counterparty_id=2
+        )
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 0.20)
+
+        market_maker.on_step_advance(
+            [
+                Underlying("FED", FED_FUNDS_RATE_UNDERLYING_ID, 2.0),
+                Underlying("AJR", AJARAI_UNDERLYING_ID, 101.0),
+                Underlying("THR", THERIODIC_UNDERLYING_ID, 100.0),
+            ],
+            [next_option],
+        )
+
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 1.20)
+        self.assertEqual(
+            market_maker.position.option_quantity_by_option_id.get(
+                expiring_option.option_id, 0
+            ),
+            0,
+        )
+        with patch.object(market_maker, "price_option", return_value=0.50):
+            self.assertEqual(market_maker.quote(next_option, 1), Quote(0.49, 2, 0.51, 2))
+
+    def test_out_of_money_short_trade_receives_expiry_credit(self) -> None:
+        option = make_option(steps=1)
+        market_maker = make_market_maker(cash=0.40, options=[option])
+        market_maker.on_trade(option, price=0.60, quantity=-1, counterparty_id=1)
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 0.0)
+
+        market_maker.on_step_advance(
+            [
+                Underlying("FED", FED_FUNDS_RATE_UNDERLYING_ID, 2.0),
+                Underlying("AJR", AJARAI_UNDERLYING_ID, 99.0),
+                Underlying("THR", THERIODIC_UNDERLYING_ID, 100.0),
+            ],
+            [],
+        )
+
+        self.assertAlmostEqual(market_maker.remaining_risk_budget, 1.0)
 
 
 class MarketMakerIntegrationTests(unittest.TestCase):

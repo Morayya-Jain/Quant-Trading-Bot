@@ -266,8 +266,8 @@ class MarketMaker:
     LIVE_PATHS: Final[int] = 4_000
     THEO_PATHS: Final[int] = 25_000
     MONTE_CARLO_SEED: Final[int] = 8_675_309
-    HALF_SPREAD: Final[float] = 0.02
-    FOK_EDGE: Final[float] = 0.02
+    HALF_SPREAD: Final[float] = 0.01
+    FOK_EDGE: Final[float] = 0.01
     BASE_QUANTITY: Final[int] = 2
     INVENTORY_LIMIT: Final[int] = 10
     SKEW_PER_CONTRACT: Final[float] = 0.005
@@ -288,10 +288,13 @@ class MarketMaker:
         self.cash_balance: float = cash_balance
         self.position: Position = Position()
         self.remaining_risk_budget: float = max(0.0, cash_balance)
+        self.long_quantity_by_option_id: dict[int, int] = defaultdict(int)
+        self.short_quantity_by_option_id: dict[int, int] = defaultdict(int)
         self.estimated_parameters: MarketParameters = self.default_parameters()
 
     def on_step_advance(self,new_underlying_state: list[Underlying], new_option_state: list[BinaryOption]
     ) -> None:
+        self.release_expiry_collateral(new_underlying_state, new_option_state)
         self.underlying_state = new_underlying_state
         self.active_option_state = new_option_state
 
@@ -299,10 +302,38 @@ class MarketMaker:
         self, option: BinaryOption, price: float, quantity: int, counterparty_id: int) -> None:
         self.position.add_option_quantity(option.option_id, quantity)
         if quantity > 0:
+            self.long_quantity_by_option_id[option.option_id] += quantity
             maximum_loss = max(0.0, price) * quantity
         else:
+            self.short_quantity_by_option_id[option.option_id] += abs(quantity)
             maximum_loss = max(0.0, 1.0 - price) * abs(quantity)
         self.remaining_risk_budget = max(0.0, self.remaining_risk_budget - maximum_loss)
+
+    def release_expiry_collateral(self, new_underlying_state: list[Underlying],
+        new_option_state: list[BinaryOption]) -> None:
+        new_options_by_id = {option.option_id: option for option in new_option_state}
+        new_values = {
+            underlying.underlying_id: underlying.value
+            for underlying in new_underlying_state
+        }
+        for option in self.active_option_state:
+            next_option = new_options_by_id.get(option.option_id)
+            still_active = (
+                next_option is not None and next_option.steps_until_expiry > 0
+            )
+            if option.steps_until_expiry != 1 or still_active:
+                continue
+
+            payoff = option.expiry_valuation(new_values)
+            option_id = option.option_id
+            credit = self.long_quantity_by_option_id.get(option_id, 0) * payoff
+            credit += self.short_quantity_by_option_id.get(option_id, 0) * (
+                1.0 - payoff
+            )
+            self.remaining_risk_budget += credit
+            self.long_quantity_by_option_id.pop(option_id, None)
+            self.short_quantity_by_option_id.pop(option_id, None)
+            self.position.option_quantity_by_option_id.pop(option_id, None)
 
     @property
     def name(self) -> str:
@@ -393,12 +424,15 @@ class MarketMaker:
         self.estimated_parameters = self.valid_parameters(estimates, defaults)
 
     def add_rate_estimates(self, estimates: dict[str, float], 
-                    rates: tuple[float, ...] | None) -> None:
+        rates: tuple[float, ...] | None) -> None:
         if rates is None:
             return
         rate_estimate = self.estimate_rate_parameters(rates)
         if rate_estimate is None:
             return
+        rate_step = self.estimate_rate_step(rates)
+        if rate_step is not None:
+            estimates["rate_step"] = rate_step
         up_probability, down_probability, reversion_strength = rate_estimate
         estimates["rate_up_probability"] = up_probability
         estimates["rate_down_probability"] = down_probability
@@ -626,11 +660,30 @@ class MarketMaker:
     def get_position(self, option_id: int) -> int:
         return self.position.option_quantity_by_option_id.get(option_id, 0)
 
+    def estimate_rate_step(self, rate_values: tuple[float, ...]) -> float | None:
+        move_counts: dict[float, int] = defaultdict(int)
+        for index in range(len(rate_values) - 1):
+            current_rate = rate_values[index]
+            next_rate = rate_values[index + 1]
+            if not math.isfinite(current_rate) or not math.isfinite(next_rate):
+                continue
+            move = round(abs(next_rate - current_rate), 2)
+            if move > self.EPSILON:
+                move_counts[move] += 1
+        if not move_counts:
+            return None
+        most_common_move = max(
+            move_counts, key=lambda move: (move_counts[move], -move)
+        )
+        return most_common_move if move_counts[most_common_move] >= 2 else None
+
     def safe_quote_quantity(self, *, inventory_room: int, maximum_loss_per_contract: float) -> int:
-        if inventory_room <= 0 or self.remaining_risk_budget <= self.EPSILON:
+        if inventory_room <= 0:
             return 0
         if maximum_loss_per_contract <= self.EPSILON:
             affordable_quantity = self.BASE_QUANTITY
+        elif self.remaining_risk_budget <= self.EPSILON:
+            return 0
         else:
             affordable_quantity = math.floor(
                 (self.remaining_risk_budget + self.EPSILON) / maximum_loss_per_contract
